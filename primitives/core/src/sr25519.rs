@@ -532,19 +532,22 @@ impl TraitPair for Pair {
 	/// Verify a signature on a message. Returns true if the signature is good.
 	fn verify<M: AsRef<[u8]>>(sig: &Self::Signature, message: M, pubkey: &Self::Public) -> bool {
 		Self::verify_weak(&sig.0[..], message, pubkey)
+
 	}
 
 	/// Verify a signature on a message. Returns true if the signature is good.
 	fn verify_weak<P: AsRef<[u8]>, M: AsRef<[u8]>>(sig: &[u8], message: M, pubkey: P) -> bool {
-		// Match both schnorrkel 0.1.1 and 0.8.0+ signatures, supporting both wallets
-		// that have not been upgraded and those that have. To swap to 0.8.0 only,
-		// create `schnorrkel::Signature` and pass that into `verify_simple`
-		match PublicKey::from_bytes(pubkey.as_ref()) {
-			Ok(pk) => pk.verify_simple_preaudit_deprecated(
-				SIGNING_CTX, message.as_ref(), &sig,
-			).is_ok(),
-			Err(_) => false,
-		}
+		let signature = match schnorrkel::Signature::from_bytes(sig) {
+			Ok(signature) => signature,
+			Err(_) => return false,
+		};
+
+		let pub_key = match PublicKey::from_bytes(pubkey.as_ref()) {
+			Ok(pub_key) => pub_key,
+			Err(_) => return false,
+		};
+
+		pub_key.verify_simple(SIGNING_CTX, message.as_ref(), &signature).is_ok()
 	}
 
 	/// Return a vec filled with raw data.
