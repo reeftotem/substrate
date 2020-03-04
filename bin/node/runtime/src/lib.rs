@@ -829,6 +829,7 @@ impl_runtime_apis! {
 				b"pallet-balances" | b"balances" => Balances::run_benchmark(extrinsic, steps, repeat),
 				b"pallet-identity" | b"identity" => Identity::run_benchmark(extrinsic, steps, repeat),
 				b"pallet-timestamp" | b"timestamp" => Timestamp::run_benchmark(extrinsic, steps, repeat),
+				b"pallet-authorship" | b"authorship" => Authorship::run_benchmark(extrinsic, steps, repeat),
 				b"pallet-im-online" | b"im-online" => ImOnline::run_benchmark(extrinsic, steps, repeat),
 				b"pallet-utility" | b"utility" => Utility::run_benchmark(extrinsic, steps, repeat),
 				_ => Err("Benchmark not found for this pallet."),
