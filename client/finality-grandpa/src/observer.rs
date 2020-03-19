@@ -159,8 +159,8 @@ pub fn run_grandpa_observer<BE, Block: BlockT, Client, N, SC>(
 	config: Config,
 	link: LinkHalf<Block, Client, SC>,
 	network: N,
-	on_exit: impl futures::Future<Output=()> + Clone + Send + Unpin + 'static,
-) -> sp_blockchain::Result<impl Future<Output = ()> + Unpin + Send + 'static> where
+) -> sp_blockchain::Result<impl Future<Output = ()> + Unpin + Send + 'static>
+where
 	BE: Backend<Block> + Unpin + 'static,
 	N: NetworkT<Block> + Send + Clone + 'static,
 	SC: SelectChain<Block> + 'static,
@@ -178,6 +178,7 @@ pub fn run_grandpa_observer<BE, Block: BlockT, Client, N, SC>(
 		network,
 		config.clone(),
 		persistent_data.set_state.clone(),
+		None,
 	);
 
 	let observer_work = ObserverWork::new(
@@ -194,7 +195,7 @@ pub fn run_grandpa_observer<BE, Block: BlockT, Client, N, SC>(
 			warn!("GRANDPA Observer failed: {:?}", e);
 		});
 
-	Ok(future::select(observer_work, on_exit).map(drop))
+	Ok(observer_work.map(drop))
 }
 
 /// Future that powers the observer.
@@ -328,7 +329,7 @@ impl<B, BE, C, N> Future for ObserverWork<B, BE, C, N>
 where
 	B: BlockT,
 	BE: Backend<B> + Unpin + 'static,
-	C: crate::ClientForGrandpa<B, BE>+ 'static,
+	C: crate::ClientForGrandpa<B, BE> + 'static,
 	N: NetworkT<B>,
 	NumberFor<B>: BlockNumberOps,
 {
@@ -424,20 +425,15 @@ mod tests {
 		tester.trigger_gossip_validator_reputation_change(&peer_id);
 
 		executor::block_on(async move {
+			// Poll the observer once and have it forward the reputation change from the gossip
+			// validator to the test network.
+			assert!(observer.now_or_never().is_none());
+
 			// Ignore initial event stream request by gossip engine.
 			match tester.events.next().now_or_never() {
 				Some(Some(Event::EventStream(_))) => {},
 				_ => panic!("expected event stream request"),
 			};
-
-			assert!(
-				tester.events.next().now_or_never().is_none(),
-				"expect no further network events",
-			);
-
-			// Poll the observer once and have it forward the reputation change from the gossip
-			// validator to the test network.
-			assert!(observer.now_or_never().is_none());
 
 			assert_matches!(tester.events.next().now_or_never(), Some(Some(Event::Report(_, _))));
 		});
