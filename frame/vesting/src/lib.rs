@@ -57,10 +57,9 @@ use frame_support::traits::{
 	Currency, LockableCurrency, VestingSchedule, WithdrawReason, LockIdentifier,
 	ExistenceRequirement, Get
 };
-use frame_support::weights::SimpleDispatchInfo;
+
 use frame_system::{self as system, ensure_signed};
 
-#[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
 
 type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
@@ -195,7 +194,7 @@ decl_module! {
 		/// - One storage read (codec `O(1)`) and up to one removal.
 		/// - One event.
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::default()]
+		#[weight = 0]
 		fn vest(origin) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			Self::update_lock(who)
@@ -217,7 +216,7 @@ decl_module! {
 		/// - One storage read (codec `O(1)`) and up to one removal.
 		/// - One event.
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::default()]
+		#[weight = 0]
 		fn vest_other(origin, target: <T::Lookup as StaticLookup>::Source) -> DispatchResult {
 			ensure_signed(origin)?;
 			Self::update_lock(T::Lookup::lookup(target)?)
@@ -237,7 +236,7 @@ decl_module! {
 		/// - Creates a new storage entry, but is protected by a minimum transfer
 		///	   amount needed to succeed.
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(1_000_000)]
+		#[weight = 1_000_000_000]
 		pub fn vested_transfer(
 			origin,
 			target: <T::Lookup as StaticLookup>::Source,
@@ -382,6 +381,9 @@ mod tests {
 		type Event = ();
 		type BlockHashCount = BlockHashCount;
 		type MaximumBlockWeight = MaximumBlockWeight;
+		type DbWeight = ();
+		type BlockExecutionWeight = ();
+		type ExtrinsicBaseWeight = ();
 		type MaximumBlockLength = MaximumBlockLength;
 		type AvailableBlockRatio = AvailableBlockRatio;
 		type Version = ();
@@ -452,7 +454,9 @@ mod tests {
 					(12, 10, 20, 5 * self.existential_deposit)
 				],
 			}.assimilate_storage(&mut t).unwrap();
-			t.into()
+			let mut ext = sp_io::TestExternalities::new(t);
+			ext.execute_with(|| System::set_block_number(1));
+			ext
 		}
 	}
 
@@ -462,7 +466,6 @@ mod tests {
 			.existential_deposit(256)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user1_free_balance = Balances::free_balance(&1);
 				let user2_free_balance = Balances::free_balance(&2);
 				let user12_free_balance = Balances::free_balance(&12);
@@ -521,7 +524,6 @@ mod tests {
 			.existential_deposit(10)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user1_free_balance = Balances::free_balance(&1);
 				assert_eq!(user1_free_balance, 100); // Account 1 has free balance
 				// Account 1 has only 5 units vested at block 1 (plus 50 unvested)
@@ -539,7 +541,6 @@ mod tests {
 			.existential_deposit(10)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user1_free_balance = Balances::free_balance(&1);
 				assert_eq!(user1_free_balance, 100); // Account 1 has free balance
 				// Account 1 has only 5 units vested at block 1 (plus 50 unvested)
@@ -555,7 +556,6 @@ mod tests {
 			.existential_deposit(10)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user1_free_balance = Balances::free_balance(&1);
 				assert_eq!(user1_free_balance, 100); // Account 1 has free balance
 				// Account 1 has only 5 units vested at block 1 (plus 50 unvested)
@@ -571,7 +571,6 @@ mod tests {
 			.existential_deposit(10)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				assert_ok!(Balances::transfer(Some(3).into(), 1, 100));
 				assert_ok!(Balances::transfer(Some(3).into(), 2, 100));
 
@@ -599,7 +598,6 @@ mod tests {
 			.existential_deposit(256)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user12_free_balance = Balances::free_balance(&12);
 
 				assert_eq!(user12_free_balance, 2560); // Account 12 has free balance
@@ -625,7 +623,6 @@ mod tests {
 			.existential_deposit(256)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user3_free_balance = Balances::free_balance(&3);
 				let user4_free_balance = Balances::free_balance(&4);
 				assert_eq!(user3_free_balance, 256 * 30);
@@ -669,7 +666,6 @@ mod tests {
 			.existential_deposit(256)
 			.build()
 			.execute_with(|| {
-				assert_eq!(System::block_number(), 1);
 				let user2_free_balance = Balances::free_balance(&2);
 				let user4_free_balance = Balances::free_balance(&4);
 				assert_eq!(user2_free_balance, 256 * 20);
