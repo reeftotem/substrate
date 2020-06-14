@@ -15,6 +15,7 @@
 
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 //! A manual sealing engine: the engine listens for rpc calls to seal blocks and create forks.
 //! This is suitable for a testing environment.
 
@@ -97,7 +98,7 @@ pub async fn run_manual_seal<B, CB, E, C, A, SC, S, T>(
 	inherent_data_providers: InherentDataProviders,
 )
 	where
-		A: txpool::ChainApi<Block=B, Hash=<B as BlockT>::Hash> + 'static,
+		A: txpool::ChainApi<Block=B> + 'static,
 		B: BlockT + 'static,
 		C: HeaderBackend<B> + Finalizer<B, CB> + 'static,
 		CB: ClientBackend<B> + 'static,
@@ -157,7 +158,7 @@ pub async fn run_instant_seal<B, CB, E, C, A, SC, T>(
 	inherent_data_providers: InherentDataProviders,
 )
 	where
-		A: txpool::ChainApi<Block=B, Hash=<B as BlockT>::Hash> + 'static,
+		A: txpool::ChainApi<Block=B> + 'static,
 		B: BlockT + 'static,
 		C: HeaderBackend<B> + Finalizer<B, CB> + 'static,
 		CB: ClientBackend<B> + 'static,
@@ -412,11 +413,12 @@ mod tests {
 		assert!(client.header(&BlockId::Number(0)).unwrap().is_some());
 		assert!(pool.submit_one(&BlockId::Number(1), SOURCE, uxt(Alice, 1)).await.is_ok());
 
+		let header = client.header(&BlockId::Number(1)).expect("db error").expect("imported above");
 		pool.maintain(sp_transaction_pool::ChainEvent::NewBlock {
-			id: BlockId::Number(1),
-			header: client.header(&BlockId::Number(1)).expect("db error").expect("imported above"),
+			hash: header.hash(),
+			header,
 			is_new_best: true,
-			retracted: vec![],
+			tree_route: None,
 		}).await;
 
 		let (tx1, rx1) = futures::channel::oneshot::channel();

@@ -15,6 +15,7 @@
 
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 //! Main entry point of the sc-network crate.
 //!
 //! There are two main structs in this module: [`NetworkWorker`] and [`NetworkService`].
@@ -156,12 +157,14 @@ impl<B: BlockT + 'static, H: ExHashT> NetworkWorker<B, H> {
 				Role::Sentry { validators } => {
 					for validator in validators {
 						sentries_and_validators.insert(validator.peer_id.clone());
+						reserved_nodes.insert(validator.peer_id.clone());
 						known_addresses.push((validator.peer_id.clone(), validator.multiaddr.clone()));
 					}
 				}
 				Role::Authority { sentry_nodes } => {
 					for sentry_node in sentry_nodes {
 						sentries_and_validators.insert(sentry_node.peer_id.clone());
+						reserved_nodes.insert(sentry_node.peer_id.clone());
 						known_addresses.push((sentry_node.peer_id.clone(), sentry_node.multiaddr.clone()));
 					}
 				}
@@ -389,9 +392,9 @@ impl<B: BlockT + 'static, H: ExHashT> NetworkWorker<B, H> {
 		self.network_service.user_protocol().num_queued_blocks()
 	}
 
-	/// Returns the number of processed blocks.
-	pub fn num_processed_blocks(&self) -> usize {
-		self.network_service.user_protocol().num_processed_blocks()
+	/// Returns the number of downloaded blocks.
+	pub fn num_downloaded_blocks(&self) -> usize {
+		self.network_service.user_protocol().num_downloaded_blocks()
 	}
 
 	/// Number of active sync requests.
@@ -558,13 +561,17 @@ impl<B: BlockT + 'static, H: ExHashT> NetworkService<B, H> {
 
 	/// Registers a new notifications protocol.
 	///
-	/// After that, you can call `write_notifications`.
+	/// After a protocol has been registered, you can call `write_notifications`.
+	///
+	/// **Important**: This method is a work-around, and you are instead strongly encouraged to
+	/// pass the protocol in the `NetworkConfiguration::notifications_protocols` list instead.
+	/// If you have no other choice but to use this method, you are very strongly encouraged to
+	/// call it very early on. Any connection open will retain the protocols that were registered
+	/// then, and not any new one.
 	///
 	/// Please call `event_stream` before registering a protocol, otherwise you may miss events
 	/// about the protocol that you have registered.
-	///
-	/// You are very strongly encouraged to call this method very early on. Any connection open
-	/// will retain the protocols that were registered then, and not any new one.
+	// TODO: remove this method after https://github.com/paritytech/substrate/issues/4587
 	pub fn register_notifications_protocol(
 		&self,
 		engine_id: ConsensusEngineId,
@@ -665,8 +672,15 @@ impl<B: BlockT + 'static, H: ExHashT> NetworkService<B, H> {
 
 	/// Adds a `PeerId` and its address as reserved. The string should encode the address
 	/// and peer ID of the remote node.
+	///
+	/// Returns an `Err` if the given string is not a valid multiaddress
+	/// or contains an invalid peer ID (which includes the local peer ID).
 	pub fn add_reserved_peer(&self, peer: String) -> Result<(), String> {
 		let (peer_id, addr) = parse_str_addr(&peer).map_err(|e| format!("{:?}", e))?;
+		// Make sure the local peer ID is never added to the PSM.
+		if peer_id == self.local_peer_id {
+			return Err("Local peer ID cannot be added as a reserved peer.".to_string())
+		}
 		self.peerset.add_reserved_peer(peer_id.clone());
 		let _ = self
 			.to_worker
@@ -687,12 +701,26 @@ impl<B: BlockT + 'static, H: ExHashT> NetworkService<B, H> {
 	}
 
 	/// Modify a peerset priority group.
+	///
+	/// Returns an `Err` if one of the given addresses contains an invalid
+	/// peer ID (which includes the local peer ID).
 	pub fn set_priority_group(&self, group_id: String, peers: HashSet<Multiaddr>) -> Result<(), String> {
-		let peers = peers.into_iter().map(|p| {
-			parse_addr(p).map_err(|e| format!("{:?}", e))
-		}).collect::<Result<Vec<(PeerId, Multiaddr)>, String>>()?;
+		let peers = peers.into_iter()
+			.map(|p| match parse_addr(p) {
+				Err(e) => Err(format!("{:?}", e)),
+				Ok((peer, addr)) =>
+					// Make sure the local peer ID is never added to the PSM
+					// or added as a "known address", even if given.
+					if peer == self.local_peer_id {
+						Err("Local peer ID in priority group.".to_string())
+					} else {
+						Ok((peer, addr))
+					}
+				})
+			.collect::<Result<Vec<(PeerId, Multiaddr)>, String>>()?;
 
 		let peer_ids = peers.iter().map(|(peer_id, _addr)| peer_id.clone()).collect();
+
 		self.peerset.set_priority_group(group_id, peer_ids);
 
 		for (peer_id, addr) in peers.into_iter() {
@@ -708,6 +736,17 @@ impl<B: BlockT + 'static, H: ExHashT> NetworkService<B, H> {
 	pub fn num_connected(&self) -> usize {
 		self.num_connected.load(Ordering::Relaxed)
 	}
+
+	/// This function should be called when blocks are added to the chain by something other
+	/// than the import queue.
+	///
+	/// > **Important**: This function is a hack and can be removed at any time. Do **not** use it.
+	pub fn update_chain(&self) {
+		let _ = self
+			.to_worker
+			.unbounded_send(ServiceToWorkerMsg::UpdateChain);
+	}
+
 }
 
 impl<B: BlockT + 'static, H: ExHashT> sp_consensus::SyncOracle
@@ -773,6 +812,7 @@ enum ServiceToWorkerMsg<B: BlockT, H: ExHashT> {
 		protocol_name: Cow<'static, [u8]>,
 	},
 	DisconnectPeer(PeerId),
+	UpdateChain,
 }
 
 /// Main network worker. Must be polled in order for the network to advance.
@@ -1101,6 +1141,8 @@ impl<B: BlockT + 'static, H: ExHashT> Future for NetworkWorker<B, H> {
 				},
 				ServiceToWorkerMsg::DisconnectPeer(who) =>
 					this.network_service.user_protocol_mut().disconnect_peer(&who),
+				ServiceToWorkerMsg::UpdateChain =>
+					this.network_service.user_protocol_mut().update_chain(),
 			}
 		}
 
@@ -1208,7 +1250,7 @@ impl<B: BlockT + 'static, H: ExHashT> Future for NetworkWorker<B, H> {
 					}
 				},
 				Poll::Ready(SwarmEvent::ExpiredListenAddr(addr)) => {
-					trace!(target: "sub-libp2p", "Libp2p => ExpiredListenAddr({})", addr);
+					info!(target: "sub-libp2p", "📪 No longer listening on {}", addr);
 					if let Some(metrics) = this.metrics.as_ref() {
 						metrics.listeners_local_addresses.dec();
 					}
@@ -1276,9 +1318,22 @@ impl<B: BlockT + 'static, H: ExHashT> Future for NetworkWorker<B, H> {
 					trace!(target: "sub-libp2p", "Libp2p => UnknownPeerUnreachableAddr({}): {}",
 						address, error),
 				Poll::Ready(SwarmEvent::ListenerClosed { reason, addresses }) => {
-					warn!(target: "sub-libp2p", "Libp2p => ListenerClosed: {:?}", reason);
 					if let Some(metrics) = this.metrics.as_ref() {
 						metrics.listeners_local_addresses.sub(addresses.len() as u64);
+					}
+					let addrs = addresses.into_iter().map(|a| a.to_string())
+						.collect::<Vec<_>>().join(", ");
+					match reason {
+						Ok(()) => error!(
+							target: "sub-libp2p",
+							"📪 Libp2p listener ({}) closed gracefully",
+							addrs
+						),
+						Err(e) => error!(
+							target: "sub-libp2p",
+							"📪 Libp2p listener ({}) closed: {}",
+							addrs, e
+						),
 					}
 				},
 				Poll::Ready(SwarmEvent::ListenerError { error }) => {
