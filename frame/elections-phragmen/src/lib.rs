@@ -101,7 +101,7 @@ use frame_support::{
 	}
 };
 use sp_npos_elections::{build_support_map, ExtendedBalance, VoteWeight, ElectionResult};
-use frame_system::{self as system, ensure_signed, ensure_root};
+use frame_system::{ensure_signed, ensure_root};
 
 mod benchmarking;
 
@@ -135,6 +135,38 @@ pub struct DefunctVoter<AccountId> {
 	/// The number of current active candidates.
 	#[codec(compact)]
 	pub candidate_count: u32
+}
+
+pub trait WeightInfo {
+	fn vote(u: u32, ) -> Weight;
+	fn vote_update(u: u32, ) -> Weight;
+	fn remove_voter(u: u32, ) -> Weight;
+	fn report_defunct_voter_correct(c: u32, v: u32, ) -> Weight;
+	fn report_defunct_voter_incorrect(c: u32, v: u32, ) -> Weight;
+	fn submit_candidacy(c: u32, ) -> Weight;
+	fn renounce_candidacy_candidate(c: u32, ) -> Weight;
+	fn renounce_candidacy_member_runner_up(u: u32, ) -> Weight;
+	fn remove_member_without_replacement(c: u32, ) -> Weight;
+	fn remove_member_with_replacement(u: u32, ) -> Weight;
+	fn remove_member_wrong_refund(u: u32, ) -> Weight;
+	fn on_initialize(c: u32, ) -> Weight;
+	fn phragmen(c: u32, v: u32, e: u32, ) -> Weight;
+}
+
+impl WeightInfo for () {
+	fn vote(_u: u32, ) -> Weight { 1_000_000_000 }
+	fn vote_update(_u: u32, ) -> Weight { 1_000_000_000 }
+	fn remove_voter(_u: u32, ) -> Weight { 1_000_000_000 }
+	fn report_defunct_voter_correct(_c: u32, _v: u32, ) -> Weight { 1_000_000_000 }
+	fn report_defunct_voter_incorrect(_c: u32, _v: u32, ) -> Weight { 1_000_000_000 }
+	fn submit_candidacy(_c: u32, ) -> Weight { 1_000_000_000 }
+	fn renounce_candidacy_candidate(_c: u32, ) -> Weight { 1_000_000_000 }
+	fn renounce_candidacy_member_runner_up(_u: u32, ) -> Weight { 1_000_000_000 }
+	fn remove_member_without_replacement(_c: u32, ) -> Weight { 1_000_000_000 }
+	fn remove_member_with_replacement(_u: u32, ) -> Weight { 1_000_000_000 }
+	fn remove_member_wrong_refund(_u: u32, ) -> Weight { 1_000_000_000 }
+	fn on_initialize(_c: u32, ) -> Weight { 1_000_000_000 }
+	fn phragmen(_c: u32, _v: u32, _e: u32, ) -> Weight { 1_000_000_000 }
 }
 
 pub trait Trait: frame_system::Trait {
@@ -184,6 +216,9 @@ pub trait Trait: frame_system::Trait {
 	/// round will happen. If set to zero, no elections are ever triggered and the module will
 	/// be in passive mode.
 	type TermDuration: Get<Self::BlockNumber>;
+
+	/// Weight information for extrinsics in this pallet.
+	type WeightInfo: WeightInfo;
 }
 
 decl_storage! {
@@ -1060,7 +1095,6 @@ mod tests {
 		traits::{BlakeTwo256, IdentityLookup, Block as BlockT},
 	};
 	use crate as elections_phragmen;
-	use frame_system as system;
 
 	parameter_types! {
 		pub const BlockHashCount: u64 = 250;
@@ -1070,10 +1104,11 @@ mod tests {
 	}
 
 	impl frame_system::Trait for Test {
+		type BaseCallFilter = ();
 		type Origin = Origin;
 		type Index = u64;
 		type BlockNumber = u64;
-		type Call = ();
+		type Call = Call;
 		type Hash = H256;
 		type Hashing = BlakeTwo256;
 		type AccountId = u64;
@@ -1093,6 +1128,7 @@ mod tests {
 		type AccountData = pallet_balances::AccountData<u64>;
 		type OnNewAccount = ();
 		type OnKilledAccount = ();
+		type SystemWeightInfo = ();
 	}
 
 	parameter_types! {
@@ -1105,7 +1141,8 @@ mod tests {
 		type DustRemoval = ();
 		type ExistentialDeposit = ExistentialDeposit;
 		type AccountStore = frame_system::Module<Test>;
-}
+		type WeightInfo = ();
+	}
 
 	parameter_types! {
 		pub const CandidacyBond: u64 = 3;
@@ -1213,6 +1250,7 @@ mod tests {
 		type LoserCandidate = ();
 		type KickedMember = ();
 		type BadReport = ();
+		type WeightInfo = ();
 	}
 
 	pub type Block = sp_runtime::generic::Block<Header, UncheckedExtrinsic>;
@@ -1224,7 +1262,7 @@ mod tests {
 			NodeBlock = Block,
 			UncheckedExtrinsic = UncheckedExtrinsic
 		{
-			System: system::{Module, Call, Event<T>},
+			System: frame_system::{Module, Call, Event<T>},
 			Balances: pallet_balances::{Module, Call, Event<T>, Config<T>},
 			Elections: elections_phragmen::{Module, Call, Event<T>, Config<T>},
 		}
@@ -1376,11 +1414,8 @@ mod tests {
 		// historical note: helper function was created in a period of time in which the API of vote
 		// call was changing. Currently it is a wrapper for the original call and does not do much.
 		// Nonetheless, totally harmless.
-		if let Origin::system(frame_system::RawOrigin::Signed(_account)) = origin {
-			Elections::vote(origin, votes, stake)
-		} else {
-			panic!("vote origin must be signed");
-		}
+		ensure_signed(origin.clone()).expect("vote origin must be signed");
+		Elections::vote(origin, votes, stake)
 	}
 
 	fn votes_of(who: &u64) -> Vec<u64> {
@@ -2358,7 +2393,7 @@ mod tests {
 			assert_ok!(submit_candidacy(Origin::signed(3)));
 			assert_ok!(vote(Origin::signed(3), vec![3], 30));
 
-			assert_ok!(Elections::remove_member(Origin::ROOT, 4, false));
+			assert_ok!(Elections::remove_member(Origin::root(), 4, false));
 
 			assert_eq!(balances(&4), (35, 2)); // slashed
 			assert_eq!(Elections::election_rounds(), 2); // new election round
@@ -2381,7 +2416,7 @@ mod tests {
 
 			// no replacement yet.
 			assert_err_with_weight!(
-				Elections::remove_member(Origin::ROOT, 4, true),
+				Elections::remove_member(Origin::root(), 4, true),
 				Error::<Test>::InvalidReplacement,
 				Some(6000000),
 			);
@@ -2403,7 +2438,7 @@ mod tests {
 
 			// there is a replacement! and this one needs a weight refund.
 			assert_err_with_weight!(
-				Elections::remove_member(Origin::ROOT, 4, false),
+				Elections::remove_member(Origin::root(), 4, false),
 				Error::<Test>::InvalidReplacement,
 				Some(6000000) // only thing that matters for now is that it is NOT the full block.
 			);
@@ -2562,7 +2597,7 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![2, 4]);
-			assert_ok!(Elections::remove_member(Origin::ROOT, 2, true));
+			assert_ok!(Elections::remove_member(Origin::root(), 2, true));
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
 		});
 	}
