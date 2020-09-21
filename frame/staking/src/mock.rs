@@ -227,6 +227,7 @@ impl frame_system::Trait for Test {
 	type SystemWeightInfo = ();
 }
 impl pallet_balances::Trait for Test {
+	type MaxLocks = ();
 	type Balance = Balance;
 	type Event = MetaEvent;
 	type DustRemoval = ();
@@ -437,7 +438,7 @@ impl ExtBuilder {
 		self.max_offchain_iterations = iterations;
 		self
 	}
-	pub fn offchain_phragmen_ext(self) -> Self {
+	pub fn offchain_election_ext(self) -> Self {
 		self.session_per_era(4)
 			.session_length(5)
 			.election_lookahead(3)
@@ -451,7 +452,7 @@ impl ExtBuilder {
 		MAX_ITERATIONS.with(|v| *v.borrow_mut() = self.max_offchain_iterations);
 	}
 	pub fn build(self) -> sp_io::TestExternalities {
-		let _ = env_logger::try_init();
+		sp_tracing::try_init_simple();
 		self.set_associated_constants();
 		let mut storage = frame_system::GenesisConfig::default()
 			.build_storage::<Test>()
@@ -787,7 +788,7 @@ pub(crate) fn add_slash(who: &AccountId) {
 
 // winners will be chosen by simply their unweighted total backing stake. Nominator stake is
 // distributed evenly.
-pub(crate) fn horrible_phragmen_with_post_processing(
+pub(crate) fn horrible_npos_solution(
 	do_reduce: bool,
 ) -> (CompactAssignments, Vec<ValidatorIndex>, ElectionScore) {
 	let mut backing_stake_of: BTreeMap<AccountId, Balance> = BTreeMap::new();

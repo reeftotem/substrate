@@ -21,8 +21,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 mod backend;
-mod precompiles;
 mod tests;
+pub mod precompiles;
 
 pub use crate::precompiles::{Precompile, Precompiles};
 pub use crate::backend::{Account, Log, Vicinity, Backend};
@@ -32,14 +32,13 @@ use sp_std::vec::Vec;
 use codec::{Encode, Decode};
 #[cfg(feature = "std")]
 use serde::{Serialize, Deserialize};
-use frame_support::{ensure, decl_module, decl_storage, decl_event, decl_error};
-use frame_support::weights::Weight;
+use frame_support::{debug, ensure, decl_module, decl_storage, decl_event, decl_error};
+use frame_support::weights::{Weight, Pays};
 use frame_support::traits::{Currency, ExistenceRequirement, Get};
+use frame_support::dispatch::DispatchResultWithPostInfo;
 use frame_system::RawOrigin;
 use sp_core::{U256, H256, H160, Hasher};
-use sp_runtime::{
-	DispatchResult, AccountId32, traits::{UniqueSaturatedInto, SaturatedConversion, BadOrigin},
-};
+use sp_runtime::{AccountId32, traits::{UniqueSaturatedInto, SaturatedConversion, BadOrigin}};
 use sha3::{Digest, Keccak256};
 pub use evm::{ExitReason, ExitSucceed, ExitError, ExitRevert, ExitFatal};
 use evm::Config;
@@ -262,17 +261,17 @@ decl_event! {
 	{
 		/// Ethereum events from contracts.
 		Log(Log),
-		/// A contract has been created at given [address].
+		/// A contract has been created at given \[address\].
 		Created(H160),
-		/// A [contract] was attempted to be created, but the execution failed.
+		/// A \[contract\] was attempted to be created, but the execution failed.
 		CreatedFailed(H160),
-		/// A [contract] has been executed successfully with states applied.
+		/// A \[contract\] has been executed successfully with states applied.
 		Executed(H160),
-		/// A [contract] has been executed with errors. States are reverted with only gas fees applied.
+		/// A \[contract\] has been executed with errors. States are reverted with only gas fees applied.
 		ExecutedFailed(H160),
-		/// A deposit has been made at a given address. [sender, address, value]
+		/// A deposit has been made at a given address. \[sender, address, value\]
 		BalanceDeposit(AccountId, H160, U256),
-		/// A withdrawal has been made from a given address. [sender, address, value]
+		/// A withdrawal has been made from a given address. \[sender, address, value\]
 		BalanceWithdraw(AccountId, H160, U256),
 	}
 }
@@ -325,8 +324,7 @@ decl_module! {
 			gas_limit: u32,
 			gas_price: U256,
 			nonce: Option<U256>,
-		) -> DispatchResult {
-			ensure!(gas_price >= T::FeeCalculator::min_gas_price(), Error::<T>::GasPriceTooLow);
+		) -> DispatchResultWithPostInfo {
 			T::CallOrigin::ensure_address_origin(&source, origin)?;
 
 			match Self::execute_call(
@@ -347,7 +345,7 @@ decl_module! {
 				},
 			}
 
-			Ok(())
+			Ok(Pays::No.into())
 		}
 
 		/// Issue an EVM create operation. This is similar to a contract creation transaction in
@@ -361,8 +359,7 @@ decl_module! {
 			gas_limit: u32,
 			gas_price: U256,
 			nonce: Option<U256>,
-		) -> DispatchResult {
-			ensure!(gas_price >= T::FeeCalculator::min_gas_price(), Error::<T>::GasPriceTooLow);
+		) -> DispatchResultWithPostInfo {
 			T::CallOrigin::ensure_address_origin(&source, origin)?;
 
 			match Self::execute_create(
@@ -382,7 +379,7 @@ decl_module! {
 				},
 			}
 
-			Ok(())
+			Ok(Pays::No.into())
 		}
 
 		/// Issue an EVM create2 operation.
@@ -396,8 +393,7 @@ decl_module! {
 			gas_limit: u32,
 			gas_price: U256,
 			nonce: Option<U256>,
-		) -> DispatchResult {
-			ensure!(gas_price >= T::FeeCalculator::min_gas_price(), Error::<T>::GasPriceTooLow);
+		) -> DispatchResultWithPostInfo {
 			T::CallOrigin::ensure_address_origin(&source, origin)?;
 
 			match Self::execute_create2(
@@ -418,7 +414,7 @@ decl_module! {
 				},
 			}
 
-			Ok(())
+			Ok(Pays::No.into())
 		}
 	}
 }
@@ -441,11 +437,11 @@ impl<T: Trait> Module<T> {
 			}
 		}
 
-		if current.balance < new.balance {
-			let diff = new.balance - current.balance;
-			T::Currency::slash(&account_id, diff.low_u128().unique_saturated_into());
-		} else if current.balance > new.balance {
+		if current.balance > new.balance {
 			let diff = current.balance - new.balance;
+			T::Currency::slash(&account_id, diff.low_u128().unique_saturated_into());
+		} else if current.balance < new.balance {
+			let diff = new.balance - current.balance;
 			T::Currency::deposit_creating(&account_id, diff.low_u128().unique_saturated_into());
 		}
 	}
@@ -585,6 +581,12 @@ impl<T: Trait> Module<T> {
 	) -> Result<(ExitReason, R, U256), Error<T>> where
 		F: FnOnce(&mut StackExecutor<Backend<T>>) -> (ExitReason, R),
 	{
+
+		// Gas price check is skipped when performing a gas estimation.
+		if apply_state {
+			ensure!(gas_price >= T::FeeCalculator::min_gas_price(), Error::<T>::GasPriceTooLow);
+		}
+
 		let vicinity = Vicinity {
 			gas_price,
 			origin: source,
@@ -613,6 +615,16 @@ impl<T: Trait> Module<T> {
 
 		let used_gas = U256::from(executor.used_gas());
 		let actual_fee = executor.fee(gas_price);
+		debug::debug!(
+			target: "evm",
+			"Execution {:?} [source: {:?}, value: {}, gas_limit: {}, used_gas: {}, actual_fee: {}]",
+			retv,
+			source,
+			value,
+			gas_limit,
+			used_gas,
+			actual_fee
+		);
 		executor.deposit(source, total_fee.saturating_sub(actual_fee));
 
 		if apply_state {

@@ -87,7 +87,7 @@ use codec::{Encode, Decode};
 use sp_std::prelude::*;
 use sp_runtime::{
 	DispatchError, RuntimeDebug, Perbill,
-	traits::{Zero, StaticLookup, Convert},
+	traits::{Zero, StaticLookup, Convert, Saturating},
 };
 use frame_support::{
 	decl_storage, decl_event, ensure, decl_module, decl_error,
@@ -709,21 +709,21 @@ decl_event!(
 		Balance = BalanceOf<T>,
 		<T as frame_system::Trait>::AccountId,
 	{
-		/// A new term with [new_members]. This indicates that enough candidates existed to run the
+		/// A new term with \[new_members\]. This indicates that enough candidates existed to run the
 		/// election, not that enough have has been elected. The inner value must be examined for
-		/// this purpose. A `NewTerm([])` indicates that some candidates got their bond slashed and
+		/// this purpose. A `NewTerm(\[\])` indicates that some candidates got their bond slashed and
 		/// none were elected, whilst `EmptyTerm` means that no candidates existed to begin with.
 		NewTerm(Vec<(AccountId, Balance)>),
 		/// No (or not enough) candidates existed for this round. This is different from
-		/// `NewTerm([])`. See the description of `NewTerm`.
+		/// `NewTerm(\[\])`. See the description of `NewTerm`.
 		EmptyTerm,
-		/// A [member] has been removed. This should always be followed by either `NewTerm` ot
+		/// A \[member\] has been removed. This should always be followed by either `NewTerm` ot
 		/// `EmptyTerm`.
 		MemberKicked(AccountId),
-		/// A [member] has renounced their candidacy.
+		/// A \[member\] has renounced their candidacy.
 		MemberRenounced(AccountId),
 		/// A voter was reported with the the report being successful or not.
-		/// [voter, reporter, success]
+		/// \[voter, reporter, success\]
 		VoterReported(AccountId, AccountId, bool),
 	}
 );
@@ -904,14 +904,20 @@ impl<T: Trait> Module<T> {
 			to_votes(Self::locked_stake_of(who))
 		};
 
-		let voters_and_votes = Voting::<T>::iter()
-			.map(|(voter, (stake, targets))| { (voter, to_votes(stake), targets) })
+		// used for prime election.
+		let voters_and_stakes = Voting::<T>::iter()
+			.map(|(voter, (stake, targets))| { (voter, stake, targets) })
+			.collect::<Vec<_>>();
+		// used for phragmen.
+		let voters_and_votes = voters_and_stakes.iter()
+			.cloned()
+			.map(|(voter, stake, targets)| { (voter, to_votes(stake), targets)} )
 			.collect::<Vec<_>>();
 		let maybe_phragmen_result = sp_npos_elections::seq_phragmen::<T::AccountId, Perbill>(
 			num_to_elect,
 			0,
 			candidates,
-			voters_and_votes.clone(),
+			voters_and_votes,
 		);
 
 		if let Some(ElectionResult { winners, assignments }) = maybe_phragmen_result {
@@ -965,17 +971,26 @@ impl<T: Trait> Module<T> {
 			// save the members, sorted based on account id.
 			new_members.sort_by(|i, j| i.0.cmp(&j.0));
 
-			let mut prime_votes: Vec<_> = new_members.iter().map(|c| (&c.0, VoteWeight::zero())).collect();
-			for (_, stake, targets) in voters_and_votes.into_iter() {
-				for (votes, who) in targets.iter()
+			// Now we select a prime member using a [Borda count](https://en.wikipedia.org/wiki/Borda_count).
+			// We weigh everyone's vote for that new member by a multiplier based on the order
+			// of the votes. i.e. the first person a voter votes for gets a 16x multiplier,
+			// the next person gets a 15x multiplier, an so on... (assuming `MAXIMUM_VOTE` = 16)
+			let mut prime_votes: Vec<_> = new_members.iter().map(|c| (&c.0, BalanceOf::<T>::zero())).collect();
+			for (_, stake, targets) in voters_and_stakes.into_iter() {
+				for (vote_multiplier, who) in targets.iter()
 					.enumerate()
-					.map(|(votes, who)| ((MAXIMUM_VOTE - votes) as u32, who))
+					.map(|(vote_position, who)| ((MAXIMUM_VOTE - vote_position) as u32, who))
 				{
 					if let Ok(i) = prime_votes.binary_search_by_key(&who, |k| k.0) {
-						prime_votes[i].1 += stake * votes as VoteWeight;
+						prime_votes[i].1 = prime_votes[i].1.saturating_add(
+							stake.saturating_mul(vote_multiplier.into())
+						);
 					}
 				}
 			}
+			// We then select the new member with the highest weighted stake. In the case of
+			// a tie, the last person in the list with the tied score is selected. This is
+			// the person with the "highest" account id based on the sort above.
 			let prime = prime_votes.into_iter().max_by_key(|x| x.1).map(|x| x.0.clone());
 
 			// new_members_ids is sorted by account id.
@@ -1141,6 +1156,7 @@ mod tests {
 		type DustRemoval = ();
 		type ExistentialDeposit = ExistentialDeposit;
 		type AccountStore = frame_system::Module<Test>;
+		type MaxLocks = ();
 		type WeightInfo = ();
 	}
 
@@ -1382,7 +1398,7 @@ mod tests {
 		assert!(
 			Elections::members().iter().chain(
 				Elections::runners_up().iter()
-			).all(|(_, s)| *s != Zero::zero())
+			).all(|(_, s)| *s != u64::zero())
 		);
 	}
 
@@ -1437,15 +1453,15 @@ mod tests {
 			assert_eq!(Elections::term_duration(), 5);
 			assert_eq!(Elections::election_rounds(), 0);
 
-			assert_eq!(Elections::members(), vec![]);
-			assert_eq!(Elections::runners_up(), vec![]);
+			assert!(Elections::members().is_empty());
+			assert!(Elections::runners_up().is_empty());
 
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 			assert_eq!(<Candidates<Test>>::decode_len(), None);
 			assert!(Elections::is_candidate(&1).is_err());
 
-			assert_eq!(all_voters(), vec![]);
-			assert_eq!(votes_of(&1), vec![]);
+			assert!(all_voters().is_empty());
+			assert!(votes_of(&1).is_empty());
 		});
 	}
 
@@ -1520,16 +1536,16 @@ mod tests {
 			assert_eq!(Elections::desired_members(), 2);
 			assert_eq!(Elections::election_rounds(), 0);
 
-			assert_eq!(Elections::members_ids(), vec![]);
-			assert_eq!(Elections::runners_up(), vec![]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::members_ids().is_empty());
+			assert!(Elections::runners_up().is_empty());
+			assert!(Elections::candidates().is_empty());
 
 			System::set_block_number(5);
 			Elections::end_block(System::block_number());
 
-			assert_eq!(Elections::members_ids(), vec![]);
-			assert_eq!(Elections::runners_up(), vec![]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::members_ids().is_empty());
+			assert!(Elections::runners_up().is_empty());
+			assert!(Elections::candidates().is_empty());
 		});
 	}
 
@@ -1572,18 +1588,18 @@ mod tests {
 			assert!(Elections::is_candidate(&2).is_ok());
 			assert_eq!(Elections::candidates(), vec![1, 2]);
 
-			assert_eq!(Elections::members_ids(), vec![]);
-			assert_eq!(Elections::runners_up(), vec![]);
+			assert!(Elections::members_ids().is_empty());
+			assert!(Elections::runners_up().is_empty());
 
 			System::set_block_number(5);
 			Elections::end_block(System::block_number());
 
 			assert!(Elections::is_candidate(&1).is_err());
 			assert!(Elections::is_candidate(&2).is_err());
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
-			assert_eq!(Elections::members_ids(), vec![]);
-			assert_eq!(Elections::runners_up(), vec![]);
+			assert!(Elections::members_ids().is_empty());
+			assert!(Elections::runners_up().is_empty());
 		});
 	}
 
@@ -1611,8 +1627,8 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![5]);
-			assert_eq!(Elections::runners_up(), vec![]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::runners_up().is_empty());
+			assert!(Elections::candidates().is_empty());
 
 			assert_noop!(
 				submit_candidacy(Origin::signed(5)),
@@ -1726,7 +1742,7 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
 			assert_ok!(vote(Origin::signed(3), vec![4, 5], 10));
 		});
@@ -1749,7 +1765,7 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
 			assert_ok!(vote(Origin::signed(3), vec![4, 5], 10));
 			assert_eq!(PRIME.with(|p| *p.borrow()), Some(4));
@@ -1775,7 +1791,7 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![3, 5]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
 			assert_eq!(PRIME.with(|p| *p.borrow()), Some(5));
 		});
@@ -1860,7 +1876,7 @@ mod tests {
 			assert_ok!(Elections::remove_voter(Origin::signed(2)));
 
 			assert_eq_uvec!(all_voters(), vec![3]);
-			assert_eq!(votes_of(&2), vec![]);
+			assert!(votes_of(&2).is_empty());
 			assert_eq!(Elections::locked_stake_of(&2), 0);
 
 			assert_eq!(balances(&2), (20, 0));
@@ -1882,7 +1898,7 @@ mod tests {
 			assert_ok!(vote(Origin::signed(2), vec![5], 20));
 
 			assert_ok!(Elections::remove_voter(Origin::signed(2)));
-			assert_eq!(all_voters(), vec![]);
+			assert!(all_voters().is_empty());
 
 			assert_noop!(Elections::remove_voter(Origin::signed(2)), Error::<Test>::MustBeVoter);
 		});
@@ -1992,7 +2008,7 @@ mod tests {
 
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
 			assert_eq!(Elections::runners_up_ids(), vec![6]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
 			// all of them have a member or runner-up that they voted for.
 			assert_eq!(Elections::is_defunct_voter(&votes_of(&5)), false);
@@ -2028,7 +2044,7 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
 			assert_eq!(balances(&3), (28, 2));
 			assert_eq!(balances(&5), (45, 5));
@@ -2056,7 +2072,7 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 
 			assert_eq!(balances(&4), (35, 5));
 			assert_eq!(balances(&5), (45, 5));
@@ -2097,9 +2113,9 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members(), vec![(3, 30), (5, 20)]);
-			assert_eq!(Elections::runners_up(), vec![]);
+			assert!(Elections::runners_up().is_empty());
 			assert_eq_uvec!(all_voters(), vec![2, 3, 4]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 			assert_eq!(<Candidates<Test>>::decode_len(), None);
 
 			assert_eq!(Elections::election_rounds(), 1);
@@ -2164,9 +2180,9 @@ mod tests {
 			System::set_block_number(5);
 			Elections::end_block(System::block_number());
 
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 			assert_eq!(Elections::election_rounds(), 1);
-			assert_eq!(Elections::members_ids(), vec![]);
+			assert!(Elections::members_ids().is_empty());
 
 			assert_eq!(
 				System::events().iter().last().unwrap().event,
@@ -2277,7 +2293,7 @@ mod tests {
 
 			System::set_block_number(10);
 			Elections::end_block(System::block_number());
-			assert_eq!(Elections::members_ids(), vec![]);
+			assert!(Elections::members_ids().is_empty());
 
 			assert_eq!(balances(&5), (47, 0));
 		});
@@ -2362,7 +2378,7 @@ mod tests {
 				assert_eq!(Elections::members(), vec![(4, 40), (5, 50)]);
 				assert_eq!(Elections::runners_up(), vec![(2, 20), (3, 30)]);
 				// no new candidates but old members and runners-up are always added.
-				assert_eq!(Elections::candidates(), vec![]);
+				assert!(Elections::candidates().is_empty());
 				assert_eq!(Elections::election_rounds(), b / 5);
 				assert_eq_uvec!(all_voters(), vec![2, 3, 4, 5]);
 			};
@@ -2474,7 +2490,7 @@ mod tests {
 			// meanwhile, no one cares to become a candidate again.
 			System::set_block_number(10);
 			Elections::end_block(System::block_number());
-			assert_eq!(Elections::members_ids(), vec![]);
+			assert!(Elections::members_ids().is_empty());
 			assert_eq!(Elections::election_rounds(), 2);
 		});
 	}
@@ -2642,14 +2658,14 @@ mod tests {
 			Elections::end_block(System::block_number());
 
 			assert_eq!(Elections::members_ids(), vec![4, 5]);
-			assert_eq!(Elections::runners_up_ids(), vec![]);
+			assert!(Elections::runners_up_ids().is_empty());
 
 			assert_ok!(Elections::renounce_candidacy(Origin::signed(4), Renouncing::Member));
 			assert_eq!(balances(&4), (38, 2)); // 2 is voting bond.
 
 			// no replacement
 			assert_eq!(Elections::members_ids(), vec![5]);
-			assert_eq!(Elections::runners_up_ids(), vec![]);
+			assert!(Elections::runners_up_ids().is_empty());
 		})
 	}
 
@@ -2713,7 +2729,7 @@ mod tests {
 
 			assert_ok!(Elections::renounce_candidacy(Origin::signed(5), Renouncing::Candidate(1)));
 			assert_eq!(balances(&5), (50, 0));
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 		})
 	}
 
@@ -2825,7 +2841,7 @@ mod tests {
 
 			assert_eq!(Elections::members_ids(), vec![1, 4]);
 			assert_eq!(Elections::runners_up_ids(), vec![2, 3]);
-			assert_eq!(Elections::candidates(), vec![]);
+			assert!(Elections::candidates().is_empty());
 		})
 	}
 }
