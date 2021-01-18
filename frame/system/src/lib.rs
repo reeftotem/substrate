@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,7 @@
 //! The System module provides low-level access to core types and cross-cutting utilities.
 //! It acts as the base layer for other pallets to interact with the Substrate framework components.
 //!
-//! - [`system::Trait`](./trait.Trait.html)
+//! - [`system::Config`](./trait.Config.html)
 //!
 //! ## Overview
 //!
@@ -74,10 +74,10 @@
 //! use frame_support::{decl_module, dispatch};
 //! use frame_system::{self as system, ensure_signed};
 //!
-//! pub trait Trait: system::Trait {}
+//! pub trait Config: system::Config {}
 //!
 //! decl_module! {
-//! 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+//! 	pub struct Module<T: Config> for enum Call where origin: T::Origin {
 //! 		#[weight = 0]
 //! 		pub fn system_module_example(origin) -> dispatch::DispatchResult {
 //! 			let _sender = ensure_signed(origin)?;
@@ -97,7 +97,6 @@ use serde::Serialize;
 use sp_std::prelude::*;
 #[cfg(any(feature = "std", test))]
 use sp_std::map;
-use sp_std::convert::Infallible;
 use sp_std::marker::PhantomData;
 use sp_std::fmt::Debug;
 use sp_version::RuntimeVersion;
@@ -107,22 +106,21 @@ use sp_runtime::{
 		self, CheckEqual, AtLeast32Bit, Zero, Lookup, LookupError,
 		SimpleBitOps, Hash, Member, MaybeDisplay, BadOrigin,
 		MaybeSerialize, MaybeSerializeDeserialize, MaybeMallocSizeOf, StaticLookup, One, Bounded,
-		Dispatchable, AtLeast32BitUnsigned
+		Dispatchable, AtLeast32BitUnsigned, Saturating, StoredMapError,
 	},
 	offchain::storage_lock::BlockNumberProvider,
 };
 
 use sp_core::{ChangesTrieConfiguration, storage::well_known_keys};
 use frame_support::{
-	decl_module, decl_event, decl_storage, decl_error, Parameter, ensure, debug,
-	storage,
+	decl_module, decl_event, decl_storage, decl_error, Parameter, debug, storage,
 	traits::{
-		Contains, Get, PalletInfo, OnNewAccount, OnKilledAccount, IsDeadAccount, Happened,
+		Contains, Get, PalletInfo, OnNewAccount, OnKilledAccount, HandleLifetime,
 		StoredMap, EnsureOrigin, OriginTrait, Filter,
 	},
 	weights::{
 		Weight, RuntimeDbWeight, DispatchInfo, DispatchClass,
-		extract_actual_weight,
+		extract_actual_weight, PerDispatchClass,
 	},
 	dispatch::DispatchResultWithPostInfo,
 };
@@ -132,14 +130,15 @@ use codec::{Encode, Decode, FullCodec, EncodeLike};
 use sp_io::TestExternalities;
 
 pub mod offchain;
+pub mod limits;
 #[cfg(test)]
 pub(crate) mod mock;
 
 mod extensions;
-mod weight;
 pub mod weights;
 #[cfg(test)]
 mod tests;
+
 
 pub use extensions::{
 	check_mortality::CheckMortality, check_genesis::CheckGenesis, check_nonce::CheckNonce,
@@ -160,10 +159,20 @@ pub fn extrinsics_data_root<H: Hash>(xts: Vec<Vec<u8>>) -> H::Output {
 	H::ordered_trie_root(xts)
 }
 
-pub trait Trait: 'static + Eq + Clone {
+/// An object to track the currently used extrinsic weight in a block.
+pub type ConsumedWeight = PerDispatchClass<Weight>;
+
+/// System configuration trait. Implemented by runtime.
+pub trait Config: 'static + Eq + Clone {
 	/// The basic call filter to use in Origin. All origins are built with this filter as base,
 	/// except Root.
 	type BaseCallFilter: Filter<Self::Call>;
+
+	/// Block & extrinsics weights: base values and limits.
+	type BlockWeights: Get<limits::BlockWeights>;
+
+	/// The maximum length of a block (in bytes).
+	type BlockLength: Get<limits::BlockLength>;
 
 	/// The `Origin` type used by dispatchable calls.
 	type Origin:
@@ -219,30 +228,8 @@ pub trait Trait: 'static + Eq + Clone {
 	/// Maximum number of block number to block hash mappings to keep (oldest pruned first).
 	type BlockHashCount: Get<Self::BlockNumber>;
 
-	/// The maximum weight of a block.
-	type MaximumBlockWeight: Get<Weight>;
-
 	/// The weight of runtime database operations the runtime can invoke.
 	type DbWeight: Get<RuntimeDbWeight>;
-
-	/// The base weight of executing a block, independent of the transactions in the block.
-	type BlockExecutionWeight: Get<Weight>;
-
-	/// The base weight of an Extrinsic in the block, independent of the of extrinsic being executed.
-	type ExtrinsicBaseWeight: Get<Weight>;
-
-	/// The maximal weight of a single Extrinsic. This should be set to at most
-	/// `MaximumBlockWeight - AverageOnInitializeWeight`. The limit only applies to extrinsics
-	/// containing `Normal` dispatch class calls.
-	type MaximumExtrinsicWeight: Get<Weight>;
-
-	/// The maximum length of a block (in bytes).
-	type MaximumBlockLength: Get<u32>;
-
-	/// The portion of the block that is available to normal transaction. The rest can only be used
-	/// by operational transactions. This can be applied to any resource limit managed by the system
-	/// module, including weight and length.
-	type AvailableBlockRatio: Get<Perbill>;
 
 	/// Get the chain's current version.
 	type Version: Get<RuntimeVersion>;
@@ -268,10 +255,17 @@ pub trait Trait: 'static + Eq + Clone {
 	type OnKilledAccount: OnKilledAccount<Self::AccountId>;
 
 	type SystemWeightInfo: WeightInfo;
+
+	/// The designated SS85 prefix of this chain.
+	///
+	/// This replaces the "ss58Format" property declared in the chain spec. Reason is
+	/// that the runtime should know about the prefix in order to make use of it as
+	/// an identifier of the chain.
+	type SS58Prefix: Get<u8>;
 }
 
-pub type DigestOf<T> = generic::Digest<<T as Trait>::Hash>;
-pub type DigestItemOf<T> = generic::DigestItem<<T as Trait>::Hash>;
+pub type DigestOf<T> = generic::Digest<<T as Config>::Hash>;
+pub type DigestItemOf<T> = generic::DigestItem<<T as Config>::Hash>;
 
 pub type Key = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
@@ -329,7 +323,7 @@ impl<AccountId> From<Option<AccountId>> for RawOrigin<AccountId> {
 }
 
 /// Exposed trait-generic origin type.
-pub type Origin<T> = RawOrigin<<T as Trait>::AccountId>;
+pub type Origin<T> = RawOrigin<<T as Config>::AccountId>;
 
 // Create a Hash with 69 for each byte,
 // only used to build genesis config.
@@ -356,7 +350,10 @@ pub struct AccountInfo<Index, AccountData> {
 	pub nonce: Index,
 	/// The number of other modules that currently depend on this account's existence. The account
 	/// cannot be reaped until this is zero.
-	pub refcount: RefCount,
+	pub consumers: RefCount,
+	/// The number of other modules that allow this account to exist. The account may not be reaped
+	/// until this is zero.
+	pub providers: RefCount,
 	/// The additional data that belongs to this account. Used to store the balance(s) in a lot of
 	/// chains.
 	pub data: AccountData,
@@ -390,7 +387,7 @@ impl From<sp_version::RuntimeVersion> for LastRuntimeUpgradeInfo {
 }
 
 decl_storage! {
-	trait Store for Module<T: Trait> as System {
+	trait Store for Module<T: Config> as System {
 		/// The full account information for a particular account ID.
 		pub Account get(fn account):
 			map hasher(blake2_128_concat) T::AccountId => AccountInfo<T::Index, T::AccountData>;
@@ -399,7 +396,7 @@ decl_storage! {
 		ExtrinsicCount: Option<u32>;
 
 		/// The current weight for the block.
-		BlockWeight get(fn block_weight): weight::ExtrinsicsWeight;
+		BlockWeight get(fn block_weight): ConsumedWeight;
 
 		/// Total length (in bytes) for all extrinsics put together, for the current block.
 		AllExtrinsicsLen: Option<u32>;
@@ -416,9 +413,6 @@ decl_storage! {
 
 		/// Hash of the previous block.
 		ParentHash get(fn parent_hash) build(|_| hash69()): T::Hash;
-
-		/// Extrinsics root of the current block, also part of the block header.
-		ExtrinsicsRoot get(fn extrinsics_root): T::Hash;
 
 		/// Digest of the current block, also part of the block header.
 		Digest get(fn digest): DigestOf<T>;
@@ -452,6 +446,10 @@ decl_storage! {
 		/// True if we have upgraded so that `type RefCount` is `u32`. False (default) if not.
 		UpgradedToU32RefCount build(|_| true): bool;
 
+		/// True if we have upgraded so that AccountInfo contains two types of `RefCount`. False
+		/// (default) if not.
+		UpgradedToDualRefCount build(|_| true): bool;
+
 		/// The execution phase of the block.
 		ExecutionPhase: Option<Phase>;
 	}
@@ -478,7 +476,7 @@ decl_storage! {
 
 decl_event!(
 	/// Event for the System module.
-	pub enum Event<T> where AccountId = <T as Trait>::AccountId {
+	pub enum Event<T> where AccountId = <T as Config>::AccountId {
 		/// An extrinsic completed successfully. \[info\]
 		ExtrinsicSuccess(DispatchInfo),
 		/// An extrinsic failed. \[error, info\]
@@ -494,7 +492,7 @@ decl_event!(
 
 decl_error! {
 	/// Error for the System module
-	pub enum Error for Module<T: Trait> {
+	pub enum Error for Module<T: Config> {
 		/// The name of specification does not match between the current runtime
 		/// and the new runtime.
 		InvalidSpecName,
@@ -512,44 +510,69 @@ decl_error! {
 	}
 }
 
+mod migrations {
+	use super::*;
+
+	#[allow(dead_code)]
+	pub fn migrate_all<T: Config>() -> frame_support::weights::Weight {
+		Account::<T>::translate::<(T::Index, u8, T::AccountData), _>(|_key, (nonce, rc, data)|
+			Some(AccountInfo { nonce, consumers: rc as RefCount, providers: 1, data })
+		);
+		T::BlockWeights::get().max_block
+	}
+
+	pub fn migrate_to_dual_ref_count<T: Config>() -> frame_support::weights::Weight {
+		Account::<T>::translate::<(T::Index, RefCount, T::AccountData), _>(|_key, (nonce, rc, data)|
+			Some(AccountInfo { nonce, consumers: rc as RefCount, providers: 1, data })
+		);
+		T::BlockWeights::get().max_block
+	}
+}
+
+/// Pallet struct placeholder on which is implemented the pallet logic.
+///
+/// It is currently an alias for `Module` as old macros still generate/use old name.
+pub type Pallet<T> = Module<T>;
+
 decl_module! {
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin, system=self {
+	pub struct Module<T: Config> for enum Call where origin: T::Origin, system=self {
 		type Error = Error<T>;
 
 		/// The maximum number of blocks to allow in mortal eras.
 		const BlockHashCount: T::BlockNumber = T::BlockHashCount::get();
 
-		/// The maximum weight of a block.
-		const MaximumBlockWeight: Weight = T::MaximumBlockWeight::get();
-
 		/// The weight of runtime database operations the runtime can invoke.
 		const DbWeight: RuntimeDbWeight = T::DbWeight::get();
 
-		/// The base weight of executing a block, independent of the transactions in the block.
-		const BlockExecutionWeight: Weight = T::BlockExecutionWeight::get();
+		/// The weight configuration (limits & base values) for each class of extrinsics and block.
+		const BlockWeights: limits::BlockWeights = T::BlockWeights::get();
 
-		/// The base weight of an Extrinsic in the block, independent of the of extrinsic being executed.
-		const ExtrinsicBaseWeight: Weight = T::ExtrinsicBaseWeight::get();
-
-		/// The maximum length of a block (in bytes).
-		const MaximumBlockLength: u32 = T::MaximumBlockLength::get();
+		/// The designated SS85 prefix of this chain.
+		///
+		/// This replaces the "ss58Format" property declared in the chain spec. Reason is
+		/// that the runtime should know about the prefix in order to make use of it as
+		/// an identifier of the chain.
+		const SS58Prefix: u8 = T::SS58Prefix::get();
 
 		fn on_runtime_upgrade() -> frame_support::weights::Weight {
-			if !UpgradedToU32RefCount::get() {
-				Account::<T>::translate::<(T::Index, u8, T::AccountData), _>(|_key, (nonce, rc, data)|
-					Some(AccountInfo { nonce, refcount: rc as RefCount, data })
-				);
-				UpgradedToU32RefCount::put(true);
-				T::MaximumBlockWeight::get()
+			if !UpgradedToDualRefCount::get() {
+				UpgradedToDualRefCount::put(true);
+				migrations::migrate_to_dual_ref_count::<T>()
 			} else {
 				0
 			}
 		}
 
+		fn integrity_test() {
+			T::BlockWeights::get()
+				.validate()
+				.expect("The weights are invalid.");
+		}
+
 		/// A dispatch that will fill the block weight up to the given ratio.
 		// TODO: This should only be available for testing, rather than in general usage, but
 		// that's not possible at present (since it's within the decl_module macro).
-		#[weight = *_ratio * T::MaximumBlockWeight::get()]
+		#[weight = *_ratio * T::BlockWeights::get().max_block]
 		fn fill_block(origin, _ratio: Perbill) {
 			ensure_root(origin)?;
 		}
@@ -590,7 +613,7 @@ decl_module! {
 		/// The weight of this function is dependent on the runtime, but generally this is very expensive.
 		/// We will treat this as a full block.
 		/// # </weight>
-		#[weight = (T::MaximumBlockWeight::get(), DispatchClass::Operational)]
+		#[weight = (T::BlockWeights::get().max_block, DispatchClass::Operational)]
 		pub fn set_code(origin, code: Vec<u8>) {
 			ensure_root(origin)?;
 			Self::can_set_code(&code)?;
@@ -607,7 +630,7 @@ decl_module! {
 		/// - 1 event.
 		/// The weight of this function is dependent on the runtime. We will treat this as a full block.
 		/// # </weight>
-		#[weight = (T::MaximumBlockWeight::get(), DispatchClass::Operational)]
+		#[weight = (T::BlockWeights::get().max_block, DispatchClass::Operational)]
 		pub fn set_code_without_checks(origin, code: Vec<u8>) {
 			ensure_root(origin)?;
 			storage::unhashed::put_raw(well_known_keys::CODE, &code);
@@ -697,25 +720,6 @@ decl_module! {
 		fn kill_prefix(origin, prefix: Key, _subkeys: u32) {
 			ensure_root(origin)?;
 			storage::unhashed::kill_prefix(&prefix);
-		}
-
-		/// Kill the sending account, assuming there are no references outstanding and the composite
-		/// data is equal to its default value.
-		///
-		/// # <weight>
-		/// - `O(1)`
-		/// - 1 storage read and deletion.
-		/// --------------------
-		/// Base Weight: 8.626 µs
-		/// No DB Read or Write operations because caller is already in overlay
-		/// # </weight>
-		#[weight = (T::SystemWeightInfo::suicide(), DispatchClass::Operational)]
-		pub fn suicide(origin) {
-			let who = ensure_signed(origin)?;
-			let account = Account::<T>::get(&who);
-			ensure!(account.refcount == 0, Error::<T>::NonZeroRefCount);
-			ensure!(account.data == T::AccountData::default(), Error::<T>::NonDefaultComposite);
-			Self::kill_account(&who);
 		}
 	}
 }
@@ -892,36 +896,162 @@ impl Default for InitKind {
 }
 
 /// Reference status; can be either referenced or unreferenced.
+#[derive(RuntimeDebug)]
 pub enum RefStatus {
 	Referenced,
 	Unreferenced,
 }
 
-impl<T: Trait> Module<T> {
-	/// Deposits an event into this block's event record.
-	pub fn deposit_event(event: impl Into<T::Event>) {
-		Self::deposit_event_indexed(&[], event.into());
+/// Some resultant status relevant to incrementing a provider reference.
+#[derive(RuntimeDebug)]
+pub enum IncRefStatus {
+	/// Account was created.
+	Created,
+	/// Account already existed.
+	Existed,
+}
+
+/// Some resultant status relevant to decrementing a provider reference.
+#[derive(RuntimeDebug)]
+pub enum DecRefStatus {
+	/// Account was destroyed.
+	Reaped,
+	/// Account still exists.
+	Exists,
+}
+
+/// Some resultant status relevant to decrementing a provider reference.
+#[derive(RuntimeDebug)]
+pub enum DecRefError {
+	/// Account cannot have the last provider reference removed while there is a consumer.
+	ConsumerRemaining,
+}
+
+/// Some resultant status relevant to incrementing a provider reference.
+#[derive(RuntimeDebug)]
+pub enum IncRefError {
+	/// Account cannot introduce a consumer while there are no providers.
+	NoProviders,
+}
+
+impl<T: Config> Module<T> {
+	pub fn account_exists(who: &T::AccountId) -> bool {
+		Account::<T>::contains_key(who)
 	}
 
 	/// Increment the reference counter on an account.
+	#[deprecated = "Use `inc_consumers` instead"]
 	pub fn inc_ref(who: &T::AccountId) {
-		Account::<T>::mutate(who, |a| a.refcount = a.refcount.saturating_add(1));
+		let _ = Self::inc_consumers(who);
 	}
 
 	/// Decrement the reference counter on an account. This *MUST* only be done once for every time
-	/// you called `inc_ref` on `who`.
+	/// you called `inc_consumers` on `who`.
+	#[deprecated = "Use `dec_consumers` instead"]
 	pub fn dec_ref(who: &T::AccountId) {
-		Account::<T>::mutate(who, |a| a.refcount = a.refcount.saturating_sub(1));
+		let _ = Self::dec_consumers(who);
 	}
 
 	/// The number of outstanding references for the account `who`.
+	#[deprecated = "Use `consumers` instead"]
 	pub fn refs(who: &T::AccountId) -> RefCount {
-		Account::<T>::get(who).refcount
+		Self::consumers(who)
 	}
 
 	/// True if the account has no outstanding references.
+	#[deprecated = "Use `!is_provider_required` instead"]
 	pub fn allow_death(who: &T::AccountId) -> bool {
-		Account::<T>::get(who).refcount == 0
+		!Self::is_provider_required(who)
+	}
+
+	/// Increment the reference counter on an account.
+	///
+	/// The account `who`'s `providers` must be non-zero or this will return an error.
+	pub fn inc_providers(who: &T::AccountId) -> IncRefStatus {
+		Account::<T>::mutate(who, |a| if a.providers == 0 {
+			// Account is being created.
+			a.providers = 1;
+			Self::on_created_account(who.clone(), a);
+			IncRefStatus::Created
+		} else {
+			a.providers = a.providers.saturating_add(1);
+			IncRefStatus::Existed
+		})
+	}
+
+	/// Decrement the reference counter on an account. This *MUST* only be done once for every time
+	/// you called `inc_consumers` on `who`.
+	pub fn dec_providers(who: &T::AccountId) -> Result<DecRefStatus, DecRefError> {
+		Account::<T>::try_mutate_exists(who, |maybe_account| {
+			if let Some(mut account) = maybe_account.take() {
+				match (account.providers, account.consumers) {
+					(0, _) => {
+						// Logic error - cannot decrement beyond zero and no item should
+						// exist with zero providers.
+						debug::print!("Logic error: Unexpected underflow in reducing provider");
+						Ok(DecRefStatus::Reaped)
+					},
+					(1, 0) => {
+						Module::<T>::on_killed_account(who.clone());
+						Ok(DecRefStatus::Reaped)
+					}
+					(1, _) => {
+						// Cannot remove last provider if there are consumers.
+						Err(DecRefError::ConsumerRemaining)
+					}
+					(x, _) => {
+						account.providers = x - 1;
+						*maybe_account = Some(account);
+						Ok(DecRefStatus::Exists)
+					}
+				}
+			} else {
+				debug::print!("Logic error: Account already dead when reducing provider");
+				Ok(DecRefStatus::Reaped)
+			}
+		})
+	}
+
+	/// The number of outstanding references for the account `who`.
+	pub fn providers(who: &T::AccountId) -> RefCount {
+		Account::<T>::get(who).providers
+	}
+
+	/// Increment the reference counter on an account.
+	///
+	/// The account `who`'s `providers` must be non-zero or this will return an error.
+	pub fn inc_consumers(who: &T::AccountId) -> Result<(), IncRefError> {
+		Account::<T>::try_mutate(who, |a| if a.providers > 0 {
+			a.consumers = a.consumers.saturating_add(1);
+			Ok(())
+		} else {
+			Err(IncRefError::NoProviders)
+		})
+	}
+
+	/// Decrement the reference counter on an account. This *MUST* only be done once for every time
+	/// you called `inc_consumers` on `who`.
+	pub fn dec_consumers(who: &T::AccountId) {
+		Account::<T>::mutate(who, |a| if a.consumers > 0 {
+			a.consumers -= 1;
+		} else {
+			debug::print!("Logic error: Unexpected underflow in reducing consumer");
+		})
+	}
+
+	/// The number of outstanding references for the account `who`.
+	pub fn consumers(who: &T::AccountId) -> RefCount {
+		Account::<T>::get(who).consumers
+	}
+
+	/// True if the account has some outstanding references.
+	pub fn is_provider_required(who: &T::AccountId) -> bool {
+		Account::<T>::get(who).consumers != 0
+	}
+
+	/// Deposits an event into this block's event record.
+	pub fn deposit_event(event: impl Into<T::Event>) {
+		Self::deposit_event_indexed(&[], event.into());
 	}
 
 	/// Deposits an event into this block's event record adding this event
@@ -1000,7 +1130,6 @@ impl<T: Trait> Module<T> {
 	pub fn initialize(
 		number: &T::BlockNumber,
 		parent_hash: &T::Hash,
-		txs_root: &T::Hash,
 		digest: &DigestOf<T>,
 		kind: InitKind,
 	) {
@@ -1011,7 +1140,6 @@ impl<T: Trait> Module<T> {
 		<Digest<T>>::put(digest);
 		<ParentHash<T>>::put(parent_hash);
 		<BlockHash<T>>::insert(*number - One::one(), parent_hash);
-		<ExtrinsicsRoot<T>>::put(txs_root);
 
 		// Remove previous block data from storage
 		BlockWeight::kill();
@@ -1024,26 +1152,38 @@ impl<T: Trait> Module<T> {
 		}
 	}
 
-	/// Remove temporary "environment" entries in storage.
+	/// Remove temporary "environment" entries in storage, compute the storage root and return the
+	/// resulting header for this block.
 	pub fn finalize() -> T::Header {
 		ExecutionPhase::kill();
-		ExtrinsicCount::kill();
 		AllExtrinsicsLen::kill();
 
-		let number = <Number<T>>::take();
-		let parent_hash = <ParentHash<T>>::take();
-		let mut digest = <Digest<T>>::take();
-		let extrinsics_root = <ExtrinsicsRoot<T>>::take();
+		// The following fields
+		//
+		// - <Events<T>>
+		// - <EventCount<T>>
+		// - <EventTopics<T>>
+		// - <Number<T>>
+		// - <ParentHash<T>>
+		// - <Digest<T>>
+		//
+		// stay to be inspected by the client and will be cleared by `Self::initialize`.
+		let number = <Number<T>>::get();
+		let parent_hash = <ParentHash<T>>::get();
+		let mut digest = <Digest<T>>::get();
+
+		let extrinsics = (0..ExtrinsicCount::take().unwrap_or_default())
+			.map(ExtrinsicData::take)
+			.collect();
+		let extrinsics_root = extrinsics_data_root::<T::Hashing>(extrinsics);
 
 		// move block hash pruning window by one block
-		let block_hash_count = <T::BlockHashCount>::get();
-		if number > block_hash_count {
-			let to_remove = number - block_hash_count - One::one();
+		let block_hash_count = T::BlockHashCount::get();
+		let to_remove = number.saturating_sub(block_hash_count).saturating_sub(One::one());
 
-			// keep genesis hash
-			if to_remove != Zero::zero() {
-				<BlockHash<T>>::remove(to_remove);
-			}
+		// keep genesis hash
+		if !to_remove.is_zero() {
+			<BlockHash<T>>::remove(to_remove);
 		}
 
 		let storage_root = T::Hash::decode(&mut &sp_io::storage::root()[..])
@@ -1059,14 +1199,6 @@ impl<T: Trait> Module<T> {
 			);
 			digest.push(item);
 		}
-
-		// The following fields
-		//
-		// - <Events<T>>
-		// - <EventCount<T>>
-		// - <EventTopics<T>>
-		//
-		// stay to be inspected by the client and will be cleared by `Self::initialize`.
 
 		<T::Header as traits::Header>::new(number, extrinsics_root, storage_root, parent_hash, digest)
 	}
@@ -1116,9 +1248,9 @@ impl<T: Trait> Module<T> {
 
 	/// Set the current block weight. This should only be used in some integration tests.
 	#[cfg(any(feature = "std", test))]
-	pub fn set_block_limits(weight: Weight, len: usize) {
+	pub fn set_block_consumed_resources(weight: Weight, len: usize) {
 		BlockWeight::mutate(|current_weight| {
-			current_weight.put(weight, DispatchClass::Normal)
+			current_weight.set(weight, DispatchClass::Normal)
 		});
 		AllExtrinsicsLen::put(len as u32);
 	}
@@ -1145,12 +1277,10 @@ impl<T: Trait> Module<T> {
 		Account::<T>::mutate(who, |a| a.nonce += T::Index::one());
 	}
 
-	/// Note what the extrinsic data of the current extrinsic index is. If this
-	/// is called, then ensure `derive_extrinsics` is also called before
-	/// block-building is completed.
+	/// Note what the extrinsic data of the current extrinsic index is.
 	///
-	/// NOTE: This function is called only when the block is being constructed locally.
-	/// `execute_block` doesn't note any extrinsics.
+	/// This is required to be called before applying an extrinsic. The data will used
+	/// in [`Self::finalize`] to calculate the correct extrinsics root.
 	pub fn note_extrinsic(encoded_xt: Vec<u8>) {
 		ExtrinsicData::insert(Self::extrinsic_index().unwrap_or_default(), encoded_xt);
 	}
@@ -1189,16 +1319,8 @@ impl<T: Trait> Module<T> {
 		ExecutionPhase::put(Phase::ApplyExtrinsic(0))
 	}
 
-	/// Remove all extrinsic data and save the extrinsics trie root.
-	pub fn derive_extrinsics() {
-		let extrinsics = (0..ExtrinsicCount::get().unwrap_or_default())
-			.map(ExtrinsicData::take).collect();
-		let xts_root = extrinsics_data_root::<T::Hashing>(extrinsics);
-		<ExtrinsicsRoot<T>>::put(xts_root);
-	}
-
 	/// An account is being created.
-	pub fn on_created_account(who: T::AccountId) {
+	pub fn on_created_account(who: T::AccountId, _a: &mut AccountInfo<T::Index, T::AccountData>) {
 		T::OnNewAccount::on_new_account(&who);
 		Self::deposit_event(RawEvent::NewAccount(who));
 	}
@@ -1207,24 +1329,6 @@ impl<T: Trait> Module<T> {
 	fn on_killed_account(who: T::AccountId) {
 		T::OnKilledAccount::on_killed_account(&who);
 		Self::deposit_event(RawEvent::KilledAccount(who));
-	}
-
-	/// Remove an account from storage. This should only be done when its refs are zero or you'll
-	/// get storage leaks in other modules. Nonetheless we assume that the calling logic knows best.
-	///
-	/// This is a no-op if the account doesn't already exist. If it does then it will ensure
-	/// cleanups (those in `on_killed_account`) take place.
-	fn kill_account(who: &T::AccountId) {
-		if Account::<T>::contains_key(who) {
-			let account = Account::<T>::take(who);
-			if account.refcount > 0 {
-				debug::debug!(
-					target: "system",
-					"WARNING: Referenced account deleted. This is probably a bug."
-				);
-			}
-		}
-		Module::<T>::on_killed_account(who.clone());
 	}
 
 	/// Determine whether or not it is possible to update the code.
@@ -1250,84 +1354,84 @@ impl<T: Trait> Module<T> {
 	}
 }
 
-/// Event handler which calls on_created_account when it happens.
-pub struct CallOnCreatedAccount<T>(PhantomData<T>);
-impl<T: Trait> Happened<T::AccountId> for CallOnCreatedAccount<T> {
-	fn happened(who: &T::AccountId) {
-		Module::<T>::on_created_account(who.clone());
+/// Event handler which registers a provider when created.
+pub struct Provider<T>(PhantomData<T>);
+impl<T: Config> HandleLifetime<T::AccountId> for Provider<T> {
+	fn created(t: &T::AccountId) -> Result<(), StoredMapError> {
+		Module::<T>::inc_providers(t);
+		Ok(())
+	}
+	fn killed(t: &T::AccountId) -> Result<(), StoredMapError> {
+		Module::<T>::dec_providers(t)
+			.map(|_| ())
+			.or_else(|e| match e {
+				DecRefError::ConsumerRemaining => Err(StoredMapError::ConsumerRemaining),
+			})
 	}
 }
 
-/// Event handler which calls kill_account when it happens.
-pub struct CallKillAccount<T>(PhantomData<T>);
-impl<T: Trait> Happened<T::AccountId> for CallKillAccount<T> {
-	fn happened(who: &T::AccountId) {
-		Module::<T>::kill_account(who)
+/// Event handler which registers a consumer when created.
+pub struct Consumer<T>(PhantomData<T>);
+impl<T: Config> HandleLifetime<T::AccountId> for Consumer<T> {
+	fn created(t: &T::AccountId) -> Result<(), StoredMapError> {
+		Module::<T>::inc_consumers(t)
+			.map_err(|e| match e {
+				IncRefError::NoProviders => StoredMapError::NoProviders
+			})
+	}
+	fn killed(t: &T::AccountId) -> Result<(), StoredMapError> {
+		Module::<T>::dec_consumers(t);
+		Ok(())
 	}
 }
 
-impl<T: Trait> BlockNumberProvider for Module<T>
+impl<T: Config> BlockNumberProvider for Module<T>
 {
-	type BlockNumber = <T as Trait>::BlockNumber;
+	type BlockNumber = <T as Config>::BlockNumber;
 
 	fn current_block_number() -> Self::BlockNumber {
 		Module::<T>::block_number()
 	}
 }
 
-// Implement StoredMap for a simple single-item, kill-account-on-remove system. This works fine for
-// storing a single item which is required to not be empty/default for the account to exist.
-// Anything more complex will need more sophisticated logic.
-impl<T: Trait> StoredMap<T::AccountId, T::AccountData> for Module<T> {
+fn is_providing<T: Default + Eq>(d: &T) -> bool {
+	d != &T::default()
+}
+
+/// Implement StoredMap for a simple single-item, provide-when-not-default system. This works fine
+/// for storing a single item which allows the account to continue existing as long as it's not
+/// empty/default.
+///
+/// Anything more complex will need more sophisticated logic.
+impl<T: Config> StoredMap<T::AccountId, T::AccountData> for Module<T> {
 	fn get(k: &T::AccountId) -> T::AccountData {
 		Account::<T>::get(k).data
 	}
-	fn is_explicit(k: &T::AccountId) -> bool {
-		Account::<T>::contains_key(k)
-	}
-	fn insert(k: &T::AccountId, data: T::AccountData) {
-		let existed = Account::<T>::contains_key(k);
-		Account::<T>::mutate(k, |a| a.data = data);
-		if !existed {
-			Self::on_created_account(k.clone());
-		}
-	}
-	fn remove(k: &T::AccountId) {
-		Self::kill_account(k)
-	}
-	fn mutate<R>(k: &T::AccountId, f: impl FnOnce(&mut T::AccountData) -> R) -> R {
-		let existed = Account::<T>::contains_key(k);
-		let r = Account::<T>::mutate(k, |a| f(&mut a.data));
-		if !existed {
-			Self::on_created_account(k.clone());
-		}
-		r
-	}
-	fn mutate_exists<R>(k: &T::AccountId, f: impl FnOnce(&mut Option<T::AccountData>) -> R) -> R {
-		Self::try_mutate_exists(k, |x| -> Result<R, Infallible> { Ok(f(x)) }).expect("Infallible; qed")
-	}
-	fn try_mutate_exists<R, E>(k: &T::AccountId, f: impl FnOnce(&mut Option<T::AccountData>) -> Result<R, E>) -> Result<R, E> {
-		Account::<T>::try_mutate_exists(k, |maybe_value| {
-			let existed = maybe_value.is_some();
-			let (maybe_prefix, mut maybe_data) = split_inner(
-				maybe_value.take(),
-				|account| ((account.nonce, account.refcount), account.data)
-			);
-			f(&mut maybe_data).map(|result| {
-				*maybe_value = maybe_data.map(|data| {
-					let (nonce, refcount) = maybe_prefix.unwrap_or_default();
-					AccountInfo { nonce, refcount, data }
-				});
-				(existed, maybe_value.is_some(), result)
-			})
-		}).map(|(existed, exists, v)| {
-			if !existed && exists {
-				Self::on_created_account(k.clone());
-			} else if existed && !exists {
-				Self::on_killed_account(k.clone());
+
+	fn try_mutate_exists<R, E: From<StoredMapError>>(
+		k: &T::AccountId,
+		f: impl FnOnce(&mut Option<T::AccountData>) -> Result<R, E>,
+	) -> Result<R, E> {
+		let account = Account::<T>::get(k);
+		let was_providing = is_providing(&account.data);
+		let mut some_data = if was_providing { Some(account.data) } else { None };
+		let result = f(&mut some_data)?;
+		let is_providing = some_data.is_some();
+		if !was_providing && is_providing {
+			Self::inc_providers(k);
+		} else if was_providing && !is_providing {
+			match Self::dec_providers(k) {
+				Err(DecRefError::ConsumerRemaining) => Err(StoredMapError::ConsumerRemaining)?,
+				Ok(DecRefStatus::Reaped) => return Ok(result),
+				Ok(DecRefStatus::Exists) => {
+					// Update value as normal...
+				}
 			}
-			v
-		})
+		} else if !was_providing && !is_providing {
+			return Ok(result)
+		}
+		Account::<T>::mutate(k, |a| a.data = some_data.unwrap_or_default());
+		Ok(result)
 	}
 }
 
@@ -1344,25 +1448,29 @@ pub fn split_inner<T, R, S>(option: Option<T>, splitter: impl FnOnce(T) -> (R, S
 	}
 }
 
-
-impl<T: Trait> IsDeadAccount<T::AccountId> for Module<T> {
-	fn is_dead_account(who: &T::AccountId) -> bool {
-		!Account::<T>::contains_key(who)
-	}
-}
-
-pub struct ChainContext<T>(sp_std::marker::PhantomData<T>);
+pub struct ChainContext<T>(PhantomData<T>);
 impl<T> Default for ChainContext<T> {
 	fn default() -> Self {
-		ChainContext(sp_std::marker::PhantomData)
+		ChainContext(PhantomData)
 	}
 }
 
-impl<T: Trait> Lookup for ChainContext<T> {
+impl<T: Config> Lookup for ChainContext<T> {
 	type Source = <T::Lookup as StaticLookup>::Source;
 	type Target = <T::Lookup as StaticLookup>::Target;
 
 	fn lookup(&self, s: Self::Source) -> Result<Self::Target, LookupError> {
 		<T::Lookup as StaticLookup>::lookup(s)
 	}
+}
+
+/// Prelude to be used alongside pallet macro, for ease of use.
+pub mod pallet_prelude {
+	pub use crate::{ensure_signed, ensure_none, ensure_root};
+
+	/// Type alias for the `Origin` associated type of system config.
+	pub type OriginFor<T> = <T as crate::Config>::Origin;
+
+	/// Type alias for the `BlockNumber` associated type of system config.
+	pub type BlockNumberFor<T> = <T as crate::Config>::BlockNumber;
 }
