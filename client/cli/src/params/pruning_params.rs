@@ -21,7 +21,7 @@ use sc_service::{PruningMode, Role, KeepBlocks};
 use structopt::StructOpt;
 
 /// Parameters to define the pruning mode
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Clone)]
 pub struct PruningParams {
 	/// Specify the state pruning mode, a number of blocks to keep or 'archive'.
 	///
@@ -46,10 +46,10 @@ impl PruningParams {
 		// unless `unsafe_pruning` is set.
 		Ok(match &self.pruning {
 			Some(ref s) if s == "archive" => PruningMode::ArchiveAll,
-			None if role.is_network_authority() => PruningMode::ArchiveAll,
+			None if role.is_authority() => PruningMode::ArchiveAll,
 			None => PruningMode::default(),
 			Some(s) => {
-				if role.is_network_authority() && !unsafe_pruning {
+				if role.is_authority() && !unsafe_pruning {
 					return Err(error::Error::Input(
 						"Validators should run with state pruning disabled (i.e. archive). \
 						You can ignore this check with `--unsafe-pruning`."

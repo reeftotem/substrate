@@ -139,15 +139,16 @@ pub trait Externalities: ExtensionStore {
 	/// Clear an entire child storage.
 	///
 	/// Deletes all keys from the overlay and up to `limit` keys from the backend. No
-	/// limit is applied if `limit` is `None`. Returns `true` if the child trie was
+	/// limit is applied if `limit` is `None`. Returned boolean is `true` if the child trie was
 	/// removed completely and `false` if there are remaining keys after the function
-	/// returns.
+	/// returns. Returned `u32` is the number of keys that was removed at the end of the
+	/// operation.
 	///
 	/// # Note
 	///
 	/// An implementation is free to delete more keys than the specified limit as long as
 	/// it is able to do that in constant time.
-	fn kill_child_storage(&mut self, child_info: &ChildInfo, limit: Option<u32>) -> bool;
+	fn kill_child_storage(&mut self, child_info: &ChildInfo, limit: Option<u32>) -> (bool, u32);
 
 	/// Clear storage entries which keys are start with the given prefix.
 	fn clear_prefix(&mut self, prefix: &[u8]);
@@ -227,6 +228,16 @@ pub trait Externalities: ExtensionStore {
 	/// no transaction is open that can be closed.
 	fn storage_commit_transaction(&mut self) -> Result<(), ()>;
 
+	/// Index specified transaction slice and store it.
+	fn storage_index_transaction(&mut self, _index: u32, _offset: u32) {
+		unimplemented!("storage_index_transaction");
+	}
+
+	/// Renew existing piece of transaction storage.
+	fn storage_renew_transaction_index(&mut self, _index: u32, _hash: &[u8], _size: u32) {
+		unimplemented!("storage_renew_transaction_index");
+	}
+
 	/// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	/// Benchmarking related functionality and shouldn't be used anywhere else!
 	/// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -270,6 +281,16 @@ pub trait Externalities: ExtensionStore {
 	///
 	/// Adds new storage keys to the DB tracking whitelist.
 	fn set_whitelist(&mut self, new: Vec<TrackedStorageKey>);
+
+	/// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	/// Benchmarking related functionality and shouldn't be used anywhere else!
+	/// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	///
+	/// Returns estimated proof size for the state queries so far.
+	/// Proof is reset on commit and wipe.
+	fn proof_size(&self) -> Option<u32> {
+		None
+	}
 }
 
 /// Extension for the [`Externalities`] trait.
@@ -291,7 +312,7 @@ pub trait ExternalitiesExt {
 
 impl ExternalitiesExt for &mut dyn Externalities {
 	fn extension<T: Any + Extension>(&mut self) -> Option<&mut T> {
-		self.extension_by_type_id(TypeId::of::<T>()).and_then(Any::downcast_mut)
+		self.extension_by_type_id(TypeId::of::<T>()).and_then(<dyn Any>::downcast_mut)
 	}
 
 	fn register_extension<T: Extension>(&mut self, ext: T) -> Result<(), Error> {

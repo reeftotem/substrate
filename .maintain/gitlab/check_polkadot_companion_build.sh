@@ -85,13 +85,8 @@ else
   boldprint "this is not a pull request - building polkadot:master"
 fi
 
-cd ..
-diener --substrate --branch $CI_COMMIT_REF_NAME --git https://gitlab.parity.io/parity/substrate.git --path polkadot
-cd polkadot
+# Patch all Substrate crates in Polkadot
+diener patch --crates-to-patch ../ --substrate --path Cargo.toml
 
 # Test Polkadot pr or master branch with this Substrate commit.
-cargo update -p sp-io
-time cargo test --all --release --verbose --features=real-overseer
-
-cd parachain/test-parachains/adder/collator/
-time cargo test --release --verbose --locked --features=real-overseer
+time cargo test --all --release --verbose

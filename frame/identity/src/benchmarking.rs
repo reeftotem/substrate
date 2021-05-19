@@ -21,20 +21,16 @@
 
 use super::*;
 
-use frame_system::{EventRecord, RawOrigin};
-use frame_benchmarking::{benchmarks, account, whitelisted_caller};
+use frame_system::RawOrigin;
+use frame_benchmarking::{benchmarks, account, whitelisted_caller, impl_benchmark_test_suite};
 use sp_runtime::traits::Bounded;
-
-use crate::Module as Identity;
+use frame_support::{ensure, traits::Get};
+use crate::Pallet as Identity;
 
 const SEED: u32 = 0;
 
 fn assert_last_event<T: Config>(generic_event: <T as Config>::Event) {
-	let events = frame_system::Module::<T>::events();
-	let system_event: <T as frame_system::Config>::Event = generic_event.into();
-	// compare to the last event record
-	let EventRecord { event, .. } = &events[events.len() - 1];
-	assert_eq!(event, &system_event);
+	frame_system::Pallet::<T>::assert_last_event(generic_event.into());
 }
 
 // Adds `r` registrars to the Identity Pallet. These registrars will have set fees and fields.
@@ -403,31 +399,8 @@ benchmarks! {
 
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::tests::{new_test_ext, Test};
-	use frame_support::assert_ok;
-
-	#[test]
-	fn test_benchmarks() {
-		new_test_ext().execute_with(|| {
-			assert_ok!(test_benchmark_add_registrar::<Test>());
-			assert_ok!(test_benchmark_set_identity::<Test>());
-			assert_ok!(test_benchmark_set_subs_new::<Test>());
-			assert_ok!(test_benchmark_set_subs_old::<Test>());
-			assert_ok!(test_benchmark_clear_identity::<Test>());
-			assert_ok!(test_benchmark_request_judgement::<Test>());
-			assert_ok!(test_benchmark_cancel_request::<Test>());
-			assert_ok!(test_benchmark_set_fee::<Test>());
-			assert_ok!(test_benchmark_set_account_id::<Test>());
-			assert_ok!(test_benchmark_set_fields::<Test>());
-			assert_ok!(test_benchmark_provide_judgement::<Test>());
-			assert_ok!(test_benchmark_kill_identity::<Test>());
-			assert_ok!(test_benchmark_add_sub::<Test>());
-			assert_ok!(test_benchmark_rename_sub::<Test>());
-			assert_ok!(test_benchmark_remove_sub::<Test>());
-			assert_ok!(test_benchmark_quit_sub::<Test>());
-		});
-	}
-}
+impl_benchmark_test_suite!(
+	Identity,
+	crate::tests::new_test_ext(),
+	crate::tests::Test,
+);

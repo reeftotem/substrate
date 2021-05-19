@@ -61,7 +61,7 @@ use libp2p::kad::handler::KademliaHandlerProto;
 use libp2p::kad::QueryId;
 use libp2p::kad::record::{self, store::{MemoryStore, RecordStore}};
 #[cfg(not(target_os = "unknown"))]
-use libp2p::mdns::{Mdns, MdnsEvent};
+use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
 use libp2p::multiaddr::Protocol;
 use log::{debug, info, trace, warn};
 use std::{cmp, collections::{HashMap, HashSet, VecDeque}, io, num::NonZeroUsize, time::Duration};
@@ -80,6 +80,7 @@ const MAX_KNOWN_EXTERNAL_ADDRESSES: usize = 32;
 pub struct DiscoveryConfig {
 	local_peer_id: PeerId,
 	user_defined: Vec<(PeerId, Multiaddr)>,
+	dht_random_walk: bool,
 	allow_private_ipv4: bool,
 	allow_non_globals_in_dht: bool,
 	discovery_only_if_under_num: u64,
@@ -94,6 +95,7 @@ impl DiscoveryConfig {
 		DiscoveryConfig {
 			local_peer_id: local_public_key.into_peer_id(),
 			user_defined: Vec::new(),
+			dht_random_walk: true,
 			allow_private_ipv4: true,
 			allow_non_globals_in_dht: false,
 			discovery_only_if_under_num: std::u64::MAX,
@@ -115,6 +117,13 @@ impl DiscoveryConfig {
 		I: IntoIterator<Item = (PeerId, Multiaddr)>
 	{
 		self.user_defined.extend(user_defined);
+		self
+	}
+
+	/// Whether the discovery behaviour should periodically perform a random
+	/// walk on the DHT to discover peers.
+	pub fn with_dht_random_walk(&mut self, value: bool) -> &mut Self {
+		self.dht_random_walk = value;
 		self
 	}
 
@@ -163,6 +172,7 @@ impl DiscoveryConfig {
 		let DiscoveryConfig {
 			local_peer_id,
 			user_defined,
+			dht_random_walk,
 			allow_private_ipv4,
 			allow_non_globals_in_dht,
 			discovery_only_if_under_num,
@@ -197,7 +207,11 @@ impl DiscoveryConfig {
 		DiscoveryBehaviour {
 			user_defined,
 			kademlias,
-			next_kad_random_query: Delay::new(Duration::new(0, 0)),
+			next_kad_random_query: if dht_random_walk {
+				Some(Delay::new(Duration::new(0, 0)))
+			} else {
+				None
+			},
 			duration_to_next_kad: Duration::from_secs(1),
 			pending_events: VecDeque::new(),
 			local_peer_id,
@@ -206,7 +220,7 @@ impl DiscoveryConfig {
 			discovery_only_if_under_num,
 			#[cfg(not(target_os = "unknown"))]
 			mdns: if enable_mdns {
-				MdnsWrapper::Instantiating(Mdns::new().boxed())
+				MdnsWrapper::Instantiating(Mdns::new(MdnsConfig::default()).boxed())
 			} else {
 				MdnsWrapper::Disabled
 			},
@@ -229,8 +243,9 @@ pub struct DiscoveryBehaviour {
 	/// Discovers nodes on the local network.
 	#[cfg(not(target_os = "unknown"))]
 	mdns: MdnsWrapper,
-	/// Stream that fires when we need to perform the next random Kademlia query.
-	next_kad_random_query: Delay,
+	/// Stream that fires when we need to perform the next random Kademlia query. `None` if
+	/// random walking is disabled.
+	next_kad_random_query: Option<Delay>,
 	/// After `next_kad_random_query` triggers, the next one triggers after this duration.
 	duration_to_next_kad: Duration,
 	/// Events to return in priority when polled.
@@ -434,6 +449,8 @@ pub enum DiscoveryOut {
 	ValuePutFailed(record::Key, Duration),
 
 	/// Started a random Kademlia query for each DHT identified by the given `ProtocolId`s.
+	///
+	/// Only happens if [`DiscoveryConfig::with_dht_random_walk`] has been configured to `true`.
 	RandomKademliaStarted(Vec<ProtocolId>),
 }
 
@@ -556,9 +573,18 @@ impl NetworkBehaviour for DiscoveryBehaviour {
 		}
 	}
 
-	fn inject_expired_listen_addr(&mut self, addr: &Multiaddr) {
+	fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
+		// We intentionally don't remove the element from `known_external_addresses` in order
+		// to not print the log line again.
+
 		for k in self.kademlias.values_mut() {
-			NetworkBehaviour::inject_expired_listen_addr(k, addr)
+			NetworkBehaviour::inject_expired_external_addr(k, addr)
+		}
+	}
+
+	fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+		for k in self.kademlias.values_mut() {
+			NetworkBehaviour::inject_expired_listen_addr(k, id, addr)
 		}
 	}
 
@@ -568,9 +594,15 @@ impl NetworkBehaviour for DiscoveryBehaviour {
 		}
 	}
 
-	fn inject_new_listen_addr(&mut self, addr: &Multiaddr) {
+	fn inject_new_listener(&mut self, id: ListenerId) {
 		for k in self.kademlias.values_mut() {
-			NetworkBehaviour::inject_new_listen_addr(k, addr)
+			NetworkBehaviour::inject_new_listener(k, id)
+		}
+	}
+
+	fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+		for k in self.kademlias.values_mut() {
+			NetworkBehaviour::inject_new_listen_addr(k, id, addr)
 		}
 	}
 
@@ -602,34 +634,36 @@ impl NetworkBehaviour for DiscoveryBehaviour {
 		}
 
 		// Poll the stream that fires when we need to start a random Kademlia query.
-		while let Poll::Ready(_) = self.next_kad_random_query.poll_unpin(cx) {
-			let actually_started = if self.num_connections < self.discovery_only_if_under_num {
-				let random_peer_id = PeerId::random();
-				debug!(target: "sub-libp2p",
-					"Libp2p <= Starting random Kademlia request for {:?}",
-					random_peer_id);
-				for k in self.kademlias.values_mut() {
-					k.get_closest_peers(random_peer_id.clone());
+		if let Some(next_kad_random_query) = self.next_kad_random_query.as_mut() {
+			while let Poll::Ready(_) = next_kad_random_query.poll_unpin(cx) {
+				let actually_started = if self.num_connections < self.discovery_only_if_under_num {
+					let random_peer_id = PeerId::random();
+					debug!(target: "sub-libp2p",
+						"Libp2p <= Starting random Kademlia request for {:?}",
+						random_peer_id);
+					for k in self.kademlias.values_mut() {
+						k.get_closest_peers(random_peer_id.clone());
+					}
+					true
+				} else {
+					debug!(
+						target: "sub-libp2p",
+						"Kademlia paused due to high number of connections ({})",
+						self.num_connections
+					);
+					false
+				};
+
+				// Schedule the next random query with exponentially increasing delay,
+				// capped at 60 seconds.
+				*next_kad_random_query = Delay::new(self.duration_to_next_kad);
+				self.duration_to_next_kad = cmp::min(self.duration_to_next_kad * 2,
+					Duration::from_secs(60));
+
+				if actually_started {
+					let ev = DiscoveryOut::RandomKademliaStarted(self.kademlias.keys().cloned().collect());
+					return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
 				}
-				true
-			} else {
-				debug!(
-					target: "sub-libp2p",
-					"Kademlia paused due to high number of connections ({})",
-					self.num_connections
-				);
-				false
-			};
-
-			// Schedule the next random query with exponentially increasing delay,
-			// capped at 60 seconds.
-			self.next_kad_random_query = Delay::new(self.duration_to_next_kad);
-			self.duration_to_next_kad = cmp::min(self.duration_to_next_kad * 2,
-				Duration::from_secs(60));
-
-			if actually_started {
-				let ev = DiscoveryOut::RandomKademliaStarted(self.kademlias.keys().cloned().collect());
-				return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
 			}
 		}
 
@@ -873,7 +907,7 @@ mod tests {
 				first_swarm_peer_id_and_addr = Some((keypair.public().into_peer_id(), listen_addr.clone()))
 			}
 
-			Swarm::listen_on(&mut swarm, listen_addr.clone()).unwrap();
+			swarm.listen_on(listen_addr.clone()).unwrap();
 			(swarm, listen_addr)
 		}).collect::<Vec<_>>();
 
@@ -896,13 +930,13 @@ mod tests {
 								DiscoveryOut::UnroutablePeer(other) | DiscoveryOut::Discovered(other) => {
 									// Call `add_self_reported_address` to simulate identify happening.
 									let addr = swarms.iter().find_map(|(s, a)|
-										if s.local_peer_id == other {
+										if s.behaviour().local_peer_id == other {
 											Some(a.clone())
 										} else {
 											None
 										})
 										.unwrap();
-									swarms[swarm_n].0.add_self_reported_address(
+									swarms[swarm_n].0.behaviour_mut().add_self_reported_address(
 										&other,
 										[protocol_name_from_protocol_id(&protocol_id)].iter(),
 										addr,

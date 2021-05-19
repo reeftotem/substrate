@@ -22,14 +22,14 @@
 use super::*;
 
 use frame_system::RawOrigin;
-use frame_benchmarking::benchmarks;
+use frame_benchmarking::{benchmarks, impl_benchmark_test_suite};
 use sp_core::OpaquePeerId;
 use sp_core::offchain::OpaqueMultiaddr;
 use sp_runtime::traits::{ValidateUnsigned, Zero};
 use sp_runtime::transaction_validity::TransactionSource;
 use frame_support::traits::UnfilteredDispatchable;
 
-use crate::Module as ImOnline;
+use crate::Pallet as ImOnline;
 
 const MAX_KEYS: u32 = 1000;
 const MAX_EXTERNAL_ADDRESSES: u32 = 100;
@@ -91,18 +91,9 @@ benchmarks! {
 	}
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::mock::{new_test_ext, Runtime};
-	use frame_support::assert_ok;
 
-	#[test]
-	fn test_benchmarks() {
-		new_test_ext().execute_with(|| {
-			assert_ok!(test_benchmark_heartbeat::<Runtime>());
-			assert_ok!(test_benchmark_validate_unsigned::<Runtime>());
-			assert_ok!(test_benchmark_validate_unsigned_and_then_heartbeat::<Runtime>());
-		});
-	}
-}
+impl_benchmark_test_suite!(
+	ImOnline,
+	crate::mock::new_test_ext(),
+	crate::mock::Runtime,
+);

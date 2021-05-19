@@ -178,7 +178,7 @@ impl<T, S, V, M> Convert<Multiplier, Multiplier> for TargetedFeeAdjustment<T, S,
 		// the computed ratio is only among the normal class.
 		let normal_max_weight = weights.get(DispatchClass::Normal).max_total
 			.unwrap_or_else(|| weights.max_block);
-		let current_block_weight = <frame_system::Module<T>>::block_weight();
+		let current_block_weight = <frame_system::Pallet<T>>::block_weight();
 		let normal_block_weight = *current_block_weight
 			.get(DispatchClass::Normal)
 			.min(&normal_max_weight);
@@ -303,7 +303,7 @@ decl_module! {
 			target += addition;
 
 			sp_io::TestExternalities::new_empty().execute_with(|| {
-				<frame_system::Module<T>>::set_block_consumed_resources(target, 0);
+				<frame_system::Pallet<T>>::set_block_consumed_resources(target, 0);
 				let next = T::FeeMultiplierUpdate::convert(min_value);
 				assert!(next > min_value, "The minimum bound of the multiplier is too low. When \
 					block saturation is more than target by 1% and multiplier is minimal then \
@@ -600,9 +600,11 @@ impl<T: Config> SignedExtension for ChargeTransactionPayment<T> where
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate as pallet_transaction_payment;
+	use frame_system as system;
 	use codec::Encode;
 	use frame_support::{
-		impl_outer_dispatch, impl_outer_origin, impl_outer_event, parameter_types,
+		assert_noop, assert_ok, parameter_types,
 		weights::{
 			DispatchClass, DispatchInfo, PostDispatchInfo, GetDispatchInfo, Weight,
 			WeightToFeePolynomial, WeightToFeeCoefficients, WeightToFeeCoefficient,
@@ -613,36 +615,30 @@ mod tests {
 	use sp_core::H256;
 	use sp_runtime::{
 		testing::{Header, TestXt},
-		traits::{BlakeTwo256, IdentityLookup},
+		traits::{BlakeTwo256, IdentityLookup, One},
+		transaction_validity::InvalidTransaction,
 		Perbill,
 	};
 	use std::cell::RefCell;
 	use smallvec::smallvec;
 
+	type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Runtime>;
+	type Block = frame_system::mocking::MockBlock<Runtime>;
+
+	frame_support::construct_runtime!(
+		pub enum Runtime where
+			Block = Block,
+			NodeBlock = Block,
+			UncheckedExtrinsic = UncheckedExtrinsic,
+		{
+			System: system::{Pallet, Call, Config, Storage, Event<T>},
+			Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>},
+			TransactionPayment: pallet_transaction_payment::{Pallet, Storage},
+		}
+	);
+
 	const CALL: &<Runtime as frame_system::Config>::Call =
 		&Call::Balances(BalancesCall::transfer(2, 69));
-
-	impl_outer_dispatch! {
-		pub enum Call for Runtime where origin: Origin {
-			pallet_balances::Balances,
-			frame_system::System,
-		}
-	}
-
-	impl_outer_event! {
-		pub enum Event for Runtime {
-			system<T>,
-			pallet_balances<T>,
-		}
-	}
-
-	#[derive(Clone, PartialEq, Eq, Debug)]
-	pub struct Runtime;
-
-	use frame_system as system;
-	impl_outer_origin!{
-		pub enum Origin for Runtime {}
-	}
 
 	thread_local! {
 		static EXTRINSIC_BASE_WEIGHT: RefCell<u64> = RefCell::new(0);
@@ -686,12 +682,13 @@ mod tests {
 		type Event = Event;
 		type BlockHashCount = BlockHashCount;
 		type Version = ();
-		type PalletInfo = ();
+		type PalletInfo = PalletInfo;
 		type AccountData = pallet_balances::AccountData<u64>;
 		type OnNewAccount = ();
 		type OnKilledAccount = ();
 		type SystemWeightInfo = ();
 		type SS58Prefix = ();
+		type OnSetCode = ();
 	}
 
 	parameter_types! {
@@ -727,10 +724,6 @@ mod tests {
 		type WeightToFee = WeightToFee;
 		type FeeMultiplierUpdate = ();
 	}
-
-	type Balances = pallet_balances::Module<Runtime>;
-	type System = frame_system::Module<Runtime>;
-	type TransactionPayment = Module<Runtime>;
 
 	pub struct ExtBuilder {
 		balance_factor: u64,
@@ -834,10 +827,9 @@ mod tests {
 				.unwrap();
 			assert_eq!(Balances::free_balance(1), 100 - 5 - 5 - 10);
 
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>
 					::post_dispatch(pre, &info_from_weight(5), &default_post_info(), len, &Ok(()))
-					.is_ok()
 			);
 			assert_eq!(Balances::free_balance(1), 100 - 5 - 5 - 10);
 
@@ -846,10 +838,9 @@ mod tests {
 				.unwrap();
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 100 - 5);
 
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>
 					::post_dispatch(pre, &info_from_weight(100), &post_info_from_weight(50), len, &Ok(()))
-					.is_ok()
 			);
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 50 - 5);
 		});
@@ -872,10 +863,9 @@ mod tests {
 			// 5 base fee, 10 byte fee, 3/2 * 100 weight fee, 5 tip
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 150 - 5);
 
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>
 					::post_dispatch(pre, &info_from_weight(100), &post_info_from_weight(50), len, &Ok(()))
-					.is_ok()
 			);
 			// 75 (3/2 of the returned 50 units of weight) is refunded
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 75 - 5);
@@ -891,10 +881,9 @@ mod tests {
 			.execute_with(||
 		{
 			// maximum weight possible
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>::from(0)
 					.pre_dispatch(&1, CALL, &info_from_weight(Weight::max_value()), 10)
-					.is_ok()
 			);
 			// fee will be proportional to what is the actual maximum weight in the runtime.
 			assert_eq!(
@@ -923,10 +912,9 @@ mod tests {
 				class: DispatchClass::Operational,
 				pays_fee: Pays::No,
 			};
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>::from(0)
 					.validate(&1, CALL, &operational_transaction , len)
-					.is_ok()
 			);
 
 			// like a InsecureFreeNormal
@@ -935,10 +923,10 @@ mod tests {
 				class: DispatchClass::Normal,
 				pays_fee: Pays::Yes,
 			};
-			assert!(
+			assert_noop!(
 				ChargeTransactionPayment::<Runtime>::from(0)
-					.validate(&1, CALL, &free_transaction , len)
-					.is_err()
+					.validate(&1, CALL, &free_transaction , len),
+				TransactionValidityError::Invalid(InvalidTransaction::Payment),
 			);
 		});
 	}
@@ -955,10 +943,9 @@ mod tests {
 			NextFeeMultiplier::put(Multiplier::saturating_from_rational(3, 2));
 			let len = 10;
 
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>::from(10) // tipped
 					.pre_dispatch(&1, CALL, &info_from_weight(3), len)
-					.is_ok()
 			);
 			assert_eq!(
 				Balances::free_balance(1),
@@ -1154,23 +1141,18 @@ mod tests {
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 100 - 5);
 
 			// kill the account between pre and post dispatch
-			assert!(Balances::transfer(Some(2).into(), 3, Balances::free_balance(2)).is_ok());
+			assert_ok!(Balances::transfer(Some(2).into(), 3, Balances::free_balance(2)));
 			assert_eq!(Balances::free_balance(2), 0);
 
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>
 					::post_dispatch(pre, &info_from_weight(100), &post_info_from_weight(50), len, &Ok(()))
-					.is_ok()
 			);
 			assert_eq!(Balances::free_balance(2), 0);
 			// Transfer Event
-			assert!(System::events().iter().any(|event| {
-				event.event == Event::pallet_balances(pallet_balances::RawEvent::Transfer(2, 3, 80))
-			}));
+			System::assert_has_event(Event::pallet_balances(pallet_balances::Event::Transfer(2, 3, 80)));
 			// Killed Event
-			assert!(System::events().iter().any(|event| {
-				event.event == Event::system(system::RawEvent::KilledAccount(2))
-			}));
+			System::assert_has_event(Event::system(system::Event::KilledAccount(2)));
 		});
 	}
 
@@ -1188,10 +1170,9 @@ mod tests {
 				.unwrap();
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 100 - 5);
 
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>
 					::post_dispatch(pre, &info_from_weight(100), &post_info_from_weight(101), len, &Ok(()))
-					.is_ok()
 			);
 			assert_eq!(Balances::free_balance(2), 200 - 5 - 10 - 100 - 5);
 		});
@@ -1218,10 +1199,9 @@ mod tests {
 				.pre_dispatch(&user, CALL, &dispatch_info, len)
 				.unwrap();
 			assert_eq!(Balances::total_balance(&user), 0);
-			assert!(
+			assert_ok!(
 				ChargeTransactionPayment::<Runtime>
 					::post_dispatch(pre, &dispatch_info, &default_post_info(), len, &Ok(()))
-					.is_ok()
 			);
 			assert_eq!(Balances::total_balance(&user), 0);
 			// No events for such a scenario

@@ -68,7 +68,7 @@ impl sc_network_gossip::Network<Block> for TestNetwork {
 		let _ = self.sender.unbounded_send(Event::WriteNotification(who, message));
 	}
 
-	fn announce(&self, block: Hash, _associated_data: Vec<u8>) {
+	fn announce(&self, block: Hash, _associated_data: Option<Vec<u8>>) {
 		let _ = self.sender.unbounded_send(Event::Announce(block));
 	}
 }
@@ -139,6 +139,7 @@ fn config() -> crate::Config {
 		name: None,
 		is_authority: true,
 		observer_enabled: true,
+		telemetry: None,
 	}
 }
 
@@ -188,6 +189,7 @@ pub(crate) fn make_test_network() -> (
 		net.clone(),
 		config(),
 		voter_set_state(),
+		None,
 		None,
 	);
 
@@ -293,6 +295,7 @@ fn good_commit_leads_to_relay() {
 					let _ = sender.unbounded_send(NetworkEvent::NotificationStreamOpened {
 						remote: sender_id.clone(),
 						protocol: GRANDPA_PROTOCOL_NAME.into(),
+						negotiated_fallback: None,
 						role: ObservedRole::Full,
 					});
 
@@ -306,6 +309,7 @@ fn good_commit_leads_to_relay() {
 					let _ = sender.unbounded_send(NetworkEvent::NotificationStreamOpened {
 						remote: receiver_id.clone(),
 						protocol: GRANDPA_PROTOCOL_NAME.into(),
+						negotiated_fallback: None,
 						role: ObservedRole::Full,
 					});
 
@@ -440,6 +444,7 @@ fn bad_commit_leads_to_report() {
 					let _ = sender.unbounded_send(NetworkEvent::NotificationStreamOpened {
 						remote: sender_id.clone(),
 						protocol: GRANDPA_PROTOCOL_NAME.into(),
+						negotiated_fallback: None,
 						role: ObservedRole::Full,
 					});
 					let _ = sender.unbounded_send(NetworkEvent::NotificationsReceived {

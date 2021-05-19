@@ -22,6 +22,7 @@ use sp_core::{
 	crypto::{Pair, Public, CryptoTypePublicPair},
 	ed25519, sr25519, ecdsa,
 };
+
 use crate::{
 	{CryptoStore, SyncCryptoStorePtr, Error, SyncCryptoStore},
 	vrf::{VRFTranscriptData, VRFSignature, make_transcript},
@@ -132,7 +133,7 @@ impl CryptoStore for KeyStore {
 		id: KeyTypeId,
 		key: &CryptoTypePublicPair,
 		msg: &[u8],
-	) -> Result<Vec<u8>, Error> {
+	) -> Result<Option<Vec<u8>>, Error> {
 		SyncCryptoStore::sign_with(self, id, key, msg)
 	}
 
@@ -141,8 +142,17 @@ impl CryptoStore for KeyStore {
 		key_type: KeyTypeId,
 		public: &sr25519::Public,
 		transcript_data: VRFTranscriptData,
-	) -> Result<VRFSignature, Error> {
+	) -> Result<Option<VRFSignature>, Error> {
 		SyncCryptoStore::sr25519_vrf_sign(self, key_type, public, transcript_data)
+	}
+
+	async fn ecdsa_sign_prehashed(
+		&self,
+		id: KeyTypeId,
+		public: &ecdsa::Public,
+		msg: &[u8; 32],
+	) -> Result<Option<ecdsa::Signature>, Error> {
+		SyncCryptoStore::ecdsa_sign_prehashed(self, id, public, msg)
 	}
 }
 
@@ -280,27 +290,27 @@ impl SyncCryptoStore for KeyStore {
 		id: KeyTypeId,
 		key: &CryptoTypePublicPair,
 		msg: &[u8],
-	) -> Result<Vec<u8>, Error> {
+	) -> Result<Option<Vec<u8>>, Error> {
 		use codec::Encode;
 
 		match key.0 {
 			ed25519::CRYPTO_ID => {
-				let key_pair: ed25519::Pair = self
-					.ed25519_key_pair(id, &ed25519::Public::from_slice(key.1.as_slice()))
-					.ok_or_else(|| Error::PairNotFound("ed25519".to_owned()))?;
-				return Ok(key_pair.sign(msg).encode());
+				let key_pair = self
+					.ed25519_key_pair(id, &ed25519::Public::from_slice(key.1.as_slice()));
+
+				key_pair.map(|k| k.sign(msg).encode()).map(Ok).transpose()
 			}
 			sr25519::CRYPTO_ID => {
-				let key_pair: sr25519::Pair = self
-					.sr25519_key_pair(id, &sr25519::Public::from_slice(key.1.as_slice()))
-					.ok_or_else(|| Error::PairNotFound("sr25519".to_owned()))?;
-				return Ok(key_pair.sign(msg).encode());
+				let key_pair = self
+					.sr25519_key_pair(id, &sr25519::Public::from_slice(key.1.as_slice()));
+
+				key_pair.map(|k| k.sign(msg).encode()).map(Ok).transpose()
 			}
 			ecdsa::CRYPTO_ID => {
-				let key_pair: ecdsa::Pair = self
-					.ecdsa_key_pair(id, &ecdsa::Public::from_slice(key.1.as_slice()))
-					.ok_or_else(|| Error::PairNotFound("ecdsa".to_owned()))?;
-				return Ok(key_pair.sign(msg).encode());
+				let key_pair = self
+					.ecdsa_key_pair(id, &ecdsa::Public::from_slice(key.1.as_slice()));
+
+				key_pair.map(|k| k.sign(msg).encode()).map(Ok).transpose()
 			}
 			_ => Err(Error::KeyNotSupported(id))
 		}
@@ -311,15 +321,29 @@ impl SyncCryptoStore for KeyStore {
 		key_type: KeyTypeId,
 		public: &sr25519::Public,
 		transcript_data: VRFTranscriptData,
-	) -> Result<VRFSignature, Error> {
+	) -> Result<Option<VRFSignature>, Error> {
 		let transcript = make_transcript(transcript_data);
-		let pair = self.sr25519_key_pair(key_type, public)
-			.ok_or_else(|| Error::PairNotFound("Not found".to_owned()))?;
+		let pair = if let Some(k) = self.sr25519_key_pair(key_type, public) {
+			k
+		} else {
+			return Ok(None)
+		};
+
 		let (inout, proof, _) = pair.as_ref().vrf_sign(transcript);
-		Ok(VRFSignature {
+		Ok(Some(VRFSignature {
 			output: inout.to_output(),
 			proof,
-		})
+		}))
+	}
+
+	fn ecdsa_sign_prehashed(
+		&self,
+		id: KeyTypeId,
+		public: &ecdsa::Public,
+		msg: &[u8; 32],
+	) -> Result<Option<ecdsa::Signature>, Error> {
+		let pair = self.ecdsa_key_pair(id, public);
+		pair.map(|k| k.sign_prehashed(msg)).map(Ok).transpose()
 	}
 }
 
@@ -338,7 +362,7 @@ impl Into<Arc<dyn CryptoStore>> for KeyStore {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use sp_core::{sr25519, testing::{ED25519, SR25519}};
+	use sp_core::{sr25519, testing::{ED25519, SR25519, ECDSA}};
 	use crate::{SyncCryptoStore, vrf::VRFTranscriptValue};
 
 	#[test]
@@ -394,7 +418,7 @@ mod tests {
 			&key_pair.public(),
 			transcript_data.clone(),
 		);
-		assert!(result.is_err());
+		assert!(result.unwrap().is_none());
 
 		SyncCryptoStore::insert_unknown(
 			&store,
@@ -410,6 +434,27 @@ mod tests {
 			transcript_data,
 		);
 
-		assert!(result.is_ok());
+		assert!(result.unwrap().is_some());
+	}
+
+	#[test]
+	fn ecdsa_sign_prehashed_works() {
+		let store = KeyStore::new();
+
+		let suri = "//Alice";
+		let pair = ecdsa::Pair::from_string(suri, None).unwrap();
+
+		let msg = sp_core::keccak_256(b"this should be a hashed message");
+		
+		// no key in key store
+		let res = SyncCryptoStore::ecdsa_sign_prehashed(&store, ECDSA, &pair.public(), &msg).unwrap();
+		assert!(res.is_none());
+
+		// insert key, sign again
+		let res = SyncCryptoStore::insert_unknown(&store, ECDSA, suri, pair.public().as_ref()).unwrap();
+		assert_eq!((), res);
+
+		let res = SyncCryptoStore::ecdsa_sign_prehashed(&store, ECDSA, &pair.public(), &msg).unwrap();
+		assert!(res.is_some());		
 	}
 }

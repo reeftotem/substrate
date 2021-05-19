@@ -19,11 +19,12 @@ use frame_support::{
 	weights::{DispatchInfo, DispatchClass, Pays, GetDispatchInfo},
 	traits::{
 		GetCallName, OnInitialize, OnFinalize, OnRuntimeUpgrade, GetPalletVersion, OnGenesis,
+		MaxEncodedLen,
 	},
 	dispatch::{UnfilteredDispatchable, Parameter},
 	storage::unhashed,
 };
-use sp_runtime::{traits::Block as _, DispatchError};
+use sp_runtime::DispatchError;
 use sp_io::{TestExternalities, hashing::{twox_64, twox_128, blake2_128}};
 
 pub struct SomeType1;
@@ -47,10 +48,10 @@ impl From<SomeType6> for u64 { fn from(_t: SomeType6) -> Self { 0u64 } }
 pub struct SomeType7;
 impl From<SomeType7> for u64 { fn from(_t: SomeType7) -> Self { 0u64 } }
 
-pub trait SomeAssociation1 { type _1: Parameter; }
+pub trait SomeAssociation1 { type _1: Parameter + MaxEncodedLen; }
 impl SomeAssociation1 for u64 { type _1 = u64; }
 
-pub trait SomeAssociation2 { type _2: Parameter; }
+pub trait SomeAssociation2 { type _2: Parameter + MaxEncodedLen; }
 impl SomeAssociation2 for u64 { type _2 = u64; }
 
 #[frame_support::pallet]
@@ -100,7 +101,8 @@ pub mod pallet {
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(crate) trait Store)]
-	pub struct Pallet<T>(PhantomData<T>);
+	#[pallet::generate_storage_info]
+	pub struct Pallet<T>(_);
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T>
@@ -155,11 +157,19 @@ pub mod pallet {
 			#[pallet::compact] foo: u32,
 		) -> DispatchResultWithPostInfo {
 			Self::deposit_event(Event::Something(0));
-			if foo != 0 {
-				Ok(().into())
-			} else {
-				Err(Error::<T>::InsufficientProposersBalance.into())
+			if foo == 0 {
+				Err(Error::<T>::InsufficientProposersBalance)?;
 			}
+
+			Ok(().into())
+		}
+
+		// Test for DispatchResult return type
+		#[pallet::weight(1)]
+		fn foo_no_post_info(
+			_origin: OriginFor<T>,
+		) -> DispatchResult {
+			Ok(())
 		}
 	}
 
@@ -201,13 +211,68 @@ pub mod pallet {
 		StorageMap<_, Blake2_128Concat, u8, u16, ValueQuery, MyDefault<T>>;
 
 	#[pallet::storage]
-	pub type Map2<T> = StorageMap<_, Twox64Concat, u16, u32>;
+	pub type Map2<T> = StorageMap<_, Twox64Concat, u16, u32, OptionQuery, GetDefault, ConstU32<3>>;
 
 	#[pallet::storage]
 	pub type DoubleMap<T> = StorageDoubleMap<_, Blake2_128Concat, u8, Twox64Concat, u16, u32>;
 
 	#[pallet::storage]
-	pub type DoubleMap2<T> = StorageDoubleMap<_, Twox64Concat, u16, Blake2_128Concat, u32, u64>;
+	pub type DoubleMap2<T> = StorageDoubleMap<
+		_, Twox64Concat, u16, Blake2_128Concat, u32, u64, OptionQuery, GetDefault, ConstU32<5>,
+	>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn nmap)]
+	pub type NMap<T> = StorageNMap<_, storage::Key<Blake2_128Concat, u8>, u32>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn nmap2)]
+	pub type NMap2<T> = StorageNMap<
+		_,
+		(
+			NMapKey<Twox64Concat, u16>,
+			NMapKey<Blake2_128Concat, u32>,
+		),
+		u64,
+		OptionQuery,
+		GetDefault,
+		ConstU32<11>,
+	>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn conditional_value)]
+	#[cfg(feature = "conditional-storage")]
+	pub type ConditionalValue<T> = StorageValue<_, u32>;
+
+	#[cfg(feature = "conditional-storage")]
+	#[pallet::storage]
+	#[pallet::getter(fn conditional_map)]
+	pub type ConditionalMap<T> =
+		StorageMap<_, Twox64Concat, u16, u32, OptionQuery, GetDefault, ConstU32<12>>;
+
+	#[cfg(feature = "conditional-storage")]
+	#[pallet::storage]
+	#[pallet::getter(fn conditional_double_map)]
+	pub type ConditionalDoubleMap<T> = StorageDoubleMap<
+		_,
+		Blake2_128Concat,
+		u8,
+		Twox64Concat,
+		u16,
+		u32,
+	>;
+
+	#[cfg(feature = "conditional-storage")]
+	#[pallet::storage]
+	#[pallet::getter(fn conditional_nmap)]
+	pub type ConditionalNMap<T> = StorageNMap<
+		_,
+		(
+			storage::Key<Blake2_128Concat, u8>,
+			storage::Key<Twox64Concat, u16>,
+		),
+		u32,
+	>;
 
 	#[pallet::genesis_config]
 	#[derive(Default)]
@@ -258,6 +323,10 @@ pub mod pallet {
 			T::AccountId::from(SomeType6); // Test for where clause
 			unimplemented!();
 		}
+
+		fn is_inherent(_call: &Self::Call) -> bool {
+			unimplemented!();
+		}
 	}
 
 	#[derive(codec::Encode, sp_runtime::RuntimeDebug)]
@@ -265,13 +334,13 @@ pub mod pallet {
 	pub enum InherentError {
 	}
 
-	impl sp_inherents::IsFatalError for InherentError {
+	impl frame_support::inherent::IsFatalError for InherentError {
 		fn is_fatal_error(&self) -> bool {
 			unimplemented!();
 		}
 	}
 
-	pub const INHERENT_IDENTIFIER: sp_inherents::InherentIdentifier = *b"testpall";
+	pub const INHERENT_IDENTIFIER: InherentIdentifier = *b"testpall";
 }
 
 // Test that a pallet with non generic event and generic genesis_config is correctly handled
@@ -290,7 +359,7 @@ pub mod pallet2 {
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(crate) trait Store)]
-	pub struct Pallet<T>(PhantomData<T>);
+	pub struct Pallet<T>(_);
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T>
@@ -335,6 +404,25 @@ pub mod pallet2 {
 	}
 }
 
+/// Test that the supertrait check works when we pass some parameter to the `frame_system::Config`.
+#[frame_support::pallet]
+pub mod pallet3 {
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
+
+	#[pallet::config]
+	pub trait Config: frame_system::Config<Origin = ()> {}
+
+	#[pallet::pallet]
+	pub struct Pallet<T>(_);
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {}
+}
+
 frame_support::parameter_types!(
 	pub const MyGetParam: u32= 10;
 	pub const MyGetParam2: u32= 11;
@@ -365,6 +453,7 @@ impl frame_system::Config for Runtime {
 	type OnKilledAccount = ();
 	type SystemWeightInfo = ();
 	type SS58Prefix = ();
+	type OnSetCode = ();
 }
 impl pallet::Config for Runtime {
 	type Event = Event;
@@ -388,9 +477,9 @@ frame_support::construct_runtime!(
 		NodeBlock = Block,
 		UncheckedExtrinsic = UncheckedExtrinsic
 	{
-		System: frame_system::{Module, Call, Event<T>},
-		Example: pallet::{Module, Call, Event<T>, Config, Storage, Inherent, Origin<T>, ValidateUnsigned},
-		Example2: pallet2::{Module, Call, Event, Config<T>, Storage},
+		System: frame_system::{Pallet, Call, Event<T>},
+		Example: pallet::{Pallet, Call, Event<T>, Config, Storage, Inherent, Origin<T>, ValidateUnsigned},
+		Example2: pallet2::{Pallet, Call, Event, Config<T>, Storage},
 	}
 );
 
@@ -425,7 +514,7 @@ fn call_expand() {
 	assert_eq!(call_foo.get_call_name(), "foo");
 	assert_eq!(
 		pallet::Call::<Runtime>::get_call_names(),
-		&["foo", "foo_transactional"],
+		&["foo", "foo_transactional", "foo_no_post_info"],
 	);
 }
 
@@ -456,6 +545,15 @@ fn instance_expand() {
 }
 
 #[test]
+fn trait_store_expand() {
+	TestExternalities::default().execute_with(|| {
+		<pallet::Pallet<Runtime> as pallet::Store>::Value::get();
+		<pallet::Pallet<Runtime> as pallet::Store>::Map::get(1);
+		<pallet::Pallet<Runtime> as pallet::Store>::DoubleMap::get(1, 2);
+	})
+}
+
+#[test]
 fn pallet_expand_deposit_event() {
 	TestExternalities::default().execute_with(|| {
 		frame_system::Pallet::<Runtime>::set_block_number(1);
@@ -470,7 +568,7 @@ fn pallet_expand_deposit_event() {
 #[test]
 fn storage_expand() {
 	use frame_support::pallet_prelude::*;
-	use frame_support::StoragePrefixedMap;
+	use frame_support::storage::StoragePrefixedMap;
 
 	fn twox_64_concat(d: &[u8]) -> Vec<u8> {
 		let mut v = twox_64(d).to_vec();
@@ -514,6 +612,27 @@ fn storage_expand() {
 		k.extend(2u32.using_encoded(blake2_128_concat));
 		assert_eq!(unhashed::get::<u64>(&k), Some(3u64));
 		assert_eq!(&k[..32], &<pallet::DoubleMap2<Runtime>>::final_prefix());
+
+		pallet::NMap::<Runtime>::insert((&1,), &3);
+		let mut k = [twox_128(b"Example"), twox_128(b"NMap")].concat();
+		k.extend(1u8.using_encoded(blake2_128_concat));
+		assert_eq!(unhashed::get::<u32>(&k), Some(3u32));
+		assert_eq!(&k[..32], &<pallet::NMap<Runtime>>::final_prefix());
+
+		pallet::NMap2::<Runtime>::insert((&1, &2), &3);
+		let mut k = [twox_128(b"Example"), twox_128(b"NMap2")].concat();
+		k.extend(1u16.using_encoded(twox_64_concat));
+		k.extend(2u32.using_encoded(blake2_128_concat));
+		assert_eq!(unhashed::get::<u64>(&k), Some(3u64));
+		assert_eq!(&k[..32], &<pallet::NMap2<Runtime>>::final_prefix());
+
+		#[cfg(feature = "conditional-storage")]
+		{
+			pallet::ConditionalValue::<Runtime>::put(1);
+			pallet::ConditionalMap::<Runtime>::insert(1, 2);
+			pallet::ConditionalDoubleMap::<Runtime>::insert(1, 2, 3);
+			pallet::ConditionalNMap::<Runtime>::insert((1, 2), 3);
+		}
 	})
 }
 
@@ -522,11 +641,11 @@ fn pallet_hooks_expand() {
 	TestExternalities::default().execute_with(|| {
 		frame_system::Pallet::<Runtime>::set_block_number(1);
 
-		assert_eq!(AllModules::on_initialize(1), 10);
-		AllModules::on_finalize(1);
+		assert_eq!(AllPallets::on_initialize(1), 10);
+		AllPallets::on_finalize(1);
 
 		assert_eq!(pallet::Pallet::<Runtime>::storage_version(), None);
-		assert_eq!(AllModules::on_runtime_upgrade(), 30);
+		assert_eq!(AllPallets::on_runtime_upgrade(), 30);
 		assert_eq!(
 			pallet::Pallet::<Runtime>::storage_version(),
 			Some(pallet::Pallet::<Runtime>::current_version()),
@@ -638,6 +757,82 @@ fn metadata() {
 					default: DecodeDifferent::Decoded(vec![0]),
 					documentation: DecodeDifferent::Decoded(vec![]),
 				},
+				StorageEntryMetadata {
+					name: DecodeDifferent::Decoded("NMap".to_string()),
+					modifier: StorageEntryModifier::Optional,
+					ty: StorageEntryType::NMap {
+						keys: DecodeDifferent::Decoded(vec!["u8".to_string()]),
+						hashers: DecodeDifferent::Decoded(vec![
+							StorageHasher::Blake2_128Concat,
+						]),
+						value: DecodeDifferent::Decoded("u32".to_string()),
+					},
+					default: DecodeDifferent::Decoded(vec![0]),
+					documentation: DecodeDifferent::Decoded(vec![]),
+				},
+				StorageEntryMetadata {
+					name: DecodeDifferent::Decoded("NMap2".to_string()),
+					modifier: StorageEntryModifier::Optional,
+					ty: StorageEntryType::NMap {
+						keys: DecodeDifferent::Decoded(vec![
+							"u16".to_string(),
+							"u32".to_string(),
+						]),
+						hashers: DecodeDifferent::Decoded(vec![
+							StorageHasher::Twox64Concat,
+							StorageHasher::Blake2_128Concat,
+						]),
+						value: DecodeDifferent::Decoded("u64".to_string()),
+					},
+					default: DecodeDifferent::Decoded(vec![0]),
+					documentation: DecodeDifferent::Decoded(vec![]),
+				},
+				#[cfg(feature = "conditional-storage")] StorageEntryMetadata {
+					name: DecodeDifferent::Decoded("ConditionalValue".to_string()),
+					modifier: StorageEntryModifier::Optional,
+					ty: StorageEntryType::Plain(DecodeDifferent::Decoded("u32".to_string())),
+					default: DecodeDifferent::Decoded(vec![0]),
+					documentation: DecodeDifferent::Decoded(vec![]),
+				},
+				#[cfg(feature = "conditional-storage")] StorageEntryMetadata {
+					name: DecodeDifferent::Decoded("ConditionalMap".to_string()),
+					modifier: StorageEntryModifier::Optional,
+					ty: StorageEntryType::Map {
+						key: DecodeDifferent::Decoded("u16".to_string()),
+						value: DecodeDifferent::Decoded("u32".to_string()),
+						hasher: StorageHasher::Twox64Concat,
+						unused: false,
+					},
+					default: DecodeDifferent::Decoded(vec![0]),
+					documentation: DecodeDifferent::Decoded(vec![]),
+				},
+				#[cfg(feature = "conditional-storage")] StorageEntryMetadata {
+					name: DecodeDifferent::Decoded("ConditionalDoubleMap".to_string()),
+					modifier: StorageEntryModifier::Optional,
+					ty: StorageEntryType::DoubleMap {
+						value: DecodeDifferent::Decoded("u32".to_string()),
+						key1: DecodeDifferent::Decoded("u8".to_string()),
+						key2: DecodeDifferent::Decoded("u16".to_string()),
+						hasher: StorageHasher::Blake2_128Concat,
+						key2_hasher: StorageHasher::Twox64Concat,
+					},
+					default: DecodeDifferent::Decoded(vec![0]),
+					documentation: DecodeDifferent::Decoded(vec![]),
+				},
+				#[cfg(feature = "conditional-storage")] StorageEntryMetadata {
+					name: DecodeDifferent::Decoded("ConditionalNMap".to_string()),
+					modifier: StorageEntryModifier::Optional,
+					ty: StorageEntryType::NMap {
+						keys: DecodeDifferent::Decoded(vec!["u8".to_string(), "u16".to_string()]),
+						hashers: DecodeDifferent::Decoded(vec![
+							StorageHasher::Blake2_128Concat,
+							StorageHasher::Twox64Concat,
+						]),
+						value: DecodeDifferent::Decoded("u32".to_string()),
+					},
+					default: DecodeDifferent::Decoded(vec![0]),
+					documentation: DecodeDifferent::Decoded(vec![]),
+				},
 			]),
 		})),
 		calls: Some(DecodeDifferent::Decoded(vec![
@@ -668,6 +863,11 @@ fn metadata() {
 				documentation: DecodeDifferent::Decoded(vec![
 					" Doc comment put in metadata".to_string(),
 				]),
+			},
+			FunctionMetadata {
+				name: DecodeDifferent::Decoded("foo_no_post_info".to_string()),
+				arguments: DecodeDifferent::Decoded(vec![]),
+				documentation: DecodeDifferent::Decoded(vec![]),
 			},
 		])),
 		event: Some(DecodeDifferent::Decoded(vec![
@@ -750,7 +950,7 @@ fn metadata() {
 	};
 
 	let metadata = match Runtime::metadata().1 {
-		RuntimeMetadata::V12(metadata) => metadata,
+		RuntimeMetadata::V13(metadata) => metadata,
 		_ => panic!("metadata has been bump, test needs to be updated"),
 	};
 
@@ -762,4 +962,109 @@ fn metadata() {
 	let pallet_metadata = ModuleMetadata::decode(&mut &modules_metadata[1].encode()[..]).unwrap();
 
 	pretty_assertions::assert_eq!(pallet_metadata, expected_pallet_metadata);
+}
+
+#[test]
+fn test_pallet_info_access() {
+	assert_eq!(<System as frame_support::traits::PalletInfoAccess>::name(), "System");
+	assert_eq!(<Example as frame_support::traits::PalletInfoAccess>::name(), "Example");
+	assert_eq!(<Example2 as frame_support::traits::PalletInfoAccess>::name(), "Example2");
+
+	assert_eq!(<System as frame_support::traits::PalletInfoAccess>::index(), 0);
+	assert_eq!(<Example as frame_support::traits::PalletInfoAccess>::index(), 1);
+	assert_eq!(<Example2 as frame_support::traits::PalletInfoAccess>::index(), 2);
+}
+
+#[test]
+fn test_storage_info() {
+	use frame_support::{
+		StorageHasher,
+		traits::{StorageInfoTrait, StorageInfo},
+		pallet_prelude::*,
+	};
+
+	let prefix = |pallet_name, storage_name| {
+		let mut res = [0u8; 32];
+		res[0..16].copy_from_slice(&Twox128::hash(pallet_name));
+		res[16..32].copy_from_slice(&Twox128::hash(storage_name));
+		res
+	};
+
+	assert_eq!(
+		Example::storage_info(),
+		vec![
+			StorageInfo {
+				prefix: prefix(b"Example", b"ValueWhereClause"),
+				max_values: Some(1),
+				max_size: Some(8),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"Value"),
+				max_values: Some(1),
+				max_size: Some(4),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"Map"),
+				max_values: None,
+				max_size: Some(3 + 16),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"Map2"),
+				max_values: Some(3),
+				max_size: Some(6 + 8),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"DoubleMap"),
+				max_values: None,
+				max_size: Some(7 + 16 + 8),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"DoubleMap2"),
+				max_values: Some(5),
+				max_size: Some(14 + 8 + 16),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"NMap"),
+				max_values: None,
+				max_size: Some(5 + 16),
+			},
+			StorageInfo {
+				prefix: prefix(b"Example", b"NMap2"),
+				max_values: Some(11),
+				max_size: Some(14 + 8 + 16),
+			},
+			#[cfg(feature = "conditional-storage")]
+			{
+				StorageInfo {
+					prefix: prefix(b"Example", b"ConditionalValue"),
+					max_values: Some(1),
+					max_size: Some(4),
+				}
+			},
+			#[cfg(feature = "conditional-storage")]
+			{
+				StorageInfo {
+					prefix: prefix(b"Example", b"ConditionalMap"),
+					max_values: Some(12),
+					max_size: Some(6 + 8),
+				}
+			},
+			#[cfg(feature = "conditional-storage")]
+			{
+				StorageInfo {
+					prefix: prefix(b"Example", b"ConditionalDoubleMap"),
+					max_values: None,
+					max_size: Some(7 + 16 + 8),
+				}
+			},
+			#[cfg(feature = "conditional-storage")]
+			{
+				StorageInfo {
+					prefix: prefix(b"Example", b"ConditionalNMap"),
+					max_values: None,
+					max_size: Some(7 + 16 + 8),
+				}
+			},
+		],
+	);
 }

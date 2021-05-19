@@ -67,7 +67,16 @@ pub enum Event {
 		/// Node we opened the substream with.
 		remote: PeerId,
 		/// The concerned protocol. Each protocol uses a different substream.
+		/// This is always equal to the value of
+		/// [`crate::config::NonDefaultSetConfig::notifications_protocol`] of one of the
+		/// configured sets.
 		protocol: Cow<'static, str>,
+		/// If the negotiation didn't use the main name of the protocol (the one in
+		/// `notifications_protocol`), then this field contains which name has actually been
+		/// used.
+		/// Always contains a value equal to the value in
+		/// [`crate::config::NonDefaultSetConfig::fallback_names`].
+		negotiated_fallback: Option<Cow<'static, str>>,
 		/// Role of the remote.
 		role: ObservedRole,
 	},
@@ -92,16 +101,16 @@ pub enum Event {
 
 /// Role that the peer sent to us during the handshake, with the addition of what our local node
 /// knows about that peer.
+///
+/// > **Note**: This enum is different from the `Role` enum. The `Role` enum indicates what a
+/// >			node says about itself, while `ObservedRole` is a `Role` merged with the
+/// >			information known locally about that node.
 #[derive(Debug, Clone)]
 pub enum ObservedRole {
 	/// Full node.
 	Full,
 	/// Light node.
 	Light,
-	/// When we are a validator node, this is a sentry that protects us.
-	OurSentry,
-	/// When we are a sentry node, this is the authority we are protecting.
-	OurGuardedAuthority,
 	/// Third-party authority.
 	Authority,
 }

@@ -200,7 +200,7 @@ pub fn maybe_print_pallet_upgrade(def: &super::DeclStorageDefExt) {
 					default_expr = to_cleaned_string(&default_expr),
 				)
 			})
-			.unwrap_or_else(|| String::new());
+			.unwrap_or_else(String::new);
 
 		let comma_query_kind = if line.is_option {
 			if line.default_value.is_some() {
@@ -214,7 +214,7 @@ pub fn maybe_print_pallet_upgrade(def: &super::DeclStorageDefExt) {
 
 		let comma_default_value_getter_name = line.default_value.as_ref()
 			.map(|_| format!(", DefaultFor{}", line.name))
-			.unwrap_or_else(|| String::new());
+			.unwrap_or_else(String::new);
 
 		let typ = match &line.storage_type {
 			StorageLineTypeDef::Map(map) => {
@@ -239,6 +239,15 @@ pub fn maybe_print_pallet_upgrade(def: &super::DeclStorageDefExt) {
 					comma_default_value_getter_name = comma_default_value_getter_name,
 				)
 			},
+			StorageLineTypeDef::NMap(map) => {
+				format!("StorageNMap<_, {keygen}, {value_type}{comma_query_kind}\
+					{comma_default_value_getter_name}>",
+					keygen = map.to_keygen_struct(&def.hidden_crate),
+					value_type = to_cleaned_string(&value_type),
+					comma_query_kind = comma_query_kind,
+					comma_default_value_getter_name = comma_default_value_getter_name,
+				)
+			}
 			StorageLineTypeDef::Simple(_) => {
 				format!("StorageValue<_, {value_type}{comma_query_kind}\
 					{comma_default_value_getter_name}>",

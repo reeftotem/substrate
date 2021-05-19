@@ -17,7 +17,7 @@
 
 //! Proc macro of Support code for the runtime.
 
-#![recursion_limit="512"]
+#![recursion_limit = "512"]
 
 mod storage;
 mod construct_runtime;
@@ -27,6 +27,8 @@ mod transactional;
 mod debug_no_bound;
 mod clone_no_bound;
 mod partial_eq_no_bound;
+mod default_no_bound;
+mod max_encoded_len;
 
 pub(crate) use storage::INHERENT_INSTANCE_NAME;
 use proc_macro::TokenStream;
@@ -154,6 +156,9 @@ use proc_macro::TokenStream;
 /// * \[optional\] `config(#field_name)`: `field_name` is optional if get is set.
 /// Will include the item in `GenesisConfig`.
 /// * \[optional\] `build(#closure)`: Closure called with storage overlays.
+/// * \[optional\] `max_values(#expr)`: `expr` is an expression returning a `u32`. It is used to
+/// implement `StorageInfoTrait`. Note this attribute is not available for storage value as the maximum
+/// number of values is 1.
 /// * `#type`: Storage type.
 /// * \[optional\] `#default`: Value returned when none.
 ///
@@ -192,7 +197,7 @@ use proc_macro::TokenStream;
 /// construct_runtime!(
 /// 	pub enum Runtime with ... {
 ///         ...,
-///         Example: example::{Module, Storage, ..., Config<T>},
+///         Example: example::{Pallet, Storage, ..., Config<T>},
 ///         ...,
 ///	}
 /// );
@@ -232,11 +237,20 @@ use proc_macro::TokenStream;
 /// add_extra_genesis {
 /// 	config(phantom): std::marker::PhantomData<I>,
 /// }
-/// ...
+/// ```
 ///
 /// This adds a field to your `GenesisConfig` with the name `phantom` that you can initialize with
 /// `Default::default()`.
 ///
+/// ## PoV information
+///
+/// To implement the trait `StorageInfoTrait` for storages an additional attribute can be used
+/// `generate_storage_info`:
+/// ```nocompile
+/// decl_storage! { generate_storage_info
+/// 	trait Store for ...
+/// }
+/// ```
 #[proc_macro]
 pub fn decl_storage(input: TokenStream) -> TokenStream {
 	storage::decl_storage_impl(input)
@@ -258,13 +272,13 @@ pub fn decl_storage(input: TokenStream) -> TokenStream {
 ///         NodeBlock = runtime::Block,
 ///         UncheckedExtrinsic = UncheckedExtrinsic
 ///     {
-///         System: system::{Module, Call, Event<T>, Config<T>} = 0,
-///         Test: test::{Module, Call} = 1,
-///         Test2: test_with_long_module::{Module, Event<T>},
+///         System: system::{Pallet, Call, Event<T>, Config<T>} = 0,
+///         Test: test::{Pallet, Call} = 1,
+///         Test2: test_with_long_module::{Pallet, Event<T>},
 ///
 ///         // Module with instances
-///         Test3_Instance1: test3::<Instance1>::{Module, Call, Storage, Event<T, I>, Config<T, I>, Origin<T, I>},
-///         Test3_DefaultInstance: test3::{Module, Call, Storage, Event<T>, Config<T>, Origin<T>} = 4,
+///         Test3_Instance1: test3::<Instance1>::{Pallet, Call, Storage, Event<T, I>, Config<T, I>, Origin<T, I>},
+///         Test3_DefaultInstance: test3::{Pallet, Call, Storage, Event<T>, Config<T>, Origin<T>} = 4,
 ///     }
 /// )
 /// ```
@@ -302,6 +316,11 @@ pub fn decl_storage(input: TokenStream) -> TokenStream {
 /// The population of the genesis storage depends on the order of modules. So, if one of your
 /// modules depends on another module, the module that is depended upon needs to come before
 /// the module depending on it.
+///
+/// # Type definitions
+///
+/// * The macro generates a type alias for each pallet to their `Module` (or `Pallet`).
+///   E.g. `type System = frame_system::Pallet<Runtime>`
 #[proc_macro]
 pub fn construct_runtime(input: TokenStream) -> TokenStream {
 	construct_runtime::construct_runtime(input)
@@ -407,6 +426,12 @@ pub fn derive_eq_no_bound(input: TokenStream) -> TokenStream {
 	).into()
 }
 
+/// derive `Default` but do no bound any generic. Docs are at `frame_support::DefaultNoBound`.
+#[proc_macro_derive(DefaultNoBound)]
+pub fn derive_default_no_bound(input: TokenStream) -> TokenStream {
+	default_no_bound::derive_default_no_bound(input)
+}
+
 #[proc_macro_attribute]
 pub fn require_transactional(attr: TokenStream, input: TokenStream) -> TokenStream {
 	transactional::require_transactional(attr, input).unwrap_or_else(|e| e.to_compile_error().into())
@@ -415,4 +440,14 @@ pub fn require_transactional(attr: TokenStream, input: TokenStream) -> TokenStre
 #[proc_macro]
 pub fn crate_to_pallet_version(input: TokenStream) -> TokenStream {
 	pallet_version::crate_to_pallet_version(input).unwrap_or_else(|e| e.to_compile_error()).into()
+}
+
+/// The number of module instances supported by the runtime, starting at index 1,
+/// and up to `NUMBER_OF_INSTANCE`.
+pub(crate) const NUMBER_OF_INSTANCE: u8 = 16;
+
+/// Derive `MaxEncodedLen`.
+#[proc_macro_derive(MaxEncodedLen)]
+pub fn derive_max_encoded_len(input: TokenStream) -> TokenStream {
+	max_encoded_len::derive_max_encoded_len(input)
 }

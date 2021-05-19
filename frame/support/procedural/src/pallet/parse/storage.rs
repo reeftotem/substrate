@@ -50,13 +50,18 @@ impl syn::parse::Parse for PalletStorageAttr {
 }
 
 /// The value and key types used by storages. Needed to expand metadata.
-pub enum Metadata{
+pub enum Metadata {
 	Value { value: syn::GenericArgument },
 	Map { value: syn::GenericArgument, key: syn::GenericArgument },
 	DoubleMap {
 		value: syn::GenericArgument,
 		key1: syn::GenericArgument,
 		key2: syn::GenericArgument
+	},
+	NMap {
+		keys: Vec<syn::Type>,
+		keygen: syn::GenericArgument,
+		value: syn::GenericArgument,
 	},
 }
 
@@ -91,6 +96,8 @@ pub struct StorageDef {
 	pub where_clause: Option<syn::WhereClause>,
 	/// The span of the pallet::storage attribute.
 	pub attr_span: proc_macro2::Span,
+	/// The `cfg` attributes.
+	pub cfg_attrs: Vec<syn::Attribute>,
 }
 
 /// In `Foo<A, B, C>` retrieve the argument at given position, i.e. A is argument at position 0.
@@ -113,6 +120,64 @@ fn retrieve_arg(
 	}
 }
 
+/// Parse the 2nd type argument to `StorageNMap` and return its keys.
+fn collect_keys(keygen: &syn::GenericArgument) -> syn::Result<Vec<syn::Type>> {
+	if let syn::GenericArgument::Type(syn::Type::Tuple(tup)) = keygen {
+		tup
+			.elems
+			.iter()
+			.map(extract_key)
+			.collect::<syn::Result<Vec<_>>>()
+	} else if let syn::GenericArgument::Type(ty) = keygen {
+		Ok(vec![extract_key(ty)?])
+	} else {
+		let msg = format!("Invalid pallet::storage, expected tuple of Key structs or Key struct");
+		Err(syn::Error::new(keygen.span(), msg))
+	}
+}
+
+/// In `Key<H, K>`, extract K and return it.
+fn extract_key(ty: &syn::Type) -> syn::Result<syn::Type> {
+	let typ = if let syn::Type::Path(typ) = ty {
+		typ
+	} else {
+		let msg = "Invalid pallet::storage, expected type path";
+		return Err(syn::Error::new(ty.span(), msg));
+	};
+
+	let key_struct = typ.path.segments.last().ok_or_else(|| {
+		let msg = "Invalid pallet::storage, expected type path with at least one segment";
+		syn::Error::new(typ.path.span(), msg)
+	})?;
+	if key_struct.ident != "Key" && key_struct.ident != "NMapKey" {
+		let msg = "Invalid pallet::storage, expected Key or NMapKey struct";
+		return Err(syn::Error::new(key_struct.ident.span(), msg));
+	}
+
+	let ty_params = if let syn::PathArguments::AngleBracketed(args) = &key_struct.arguments {
+		args
+	} else {
+		let msg = "Invalid pallet::storage, expected angle bracketed arguments";
+		return Err(syn::Error::new(key_struct.arguments.span(), msg));
+	};
+
+	if ty_params.args.len() != 2 {
+		let msg = format!("Invalid pallet::storage, unexpected number of generic arguments \
+			for Key struct, expected 2 args, found {}", ty_params.args.len());
+		return Err(syn::Error::new(ty_params.span(), msg));
+	}
+
+	let key = match &ty_params.args[1] {
+		syn::GenericArgument::Type(key_ty) => key_ty.clone(),
+		_ => {
+			let msg = "Invalid pallet::storage, expected type";
+			return Err(syn::Error::new(ty_params.args[1].span(), msg));
+		}
+	};
+
+	Ok(key)
+}
+
 impl StorageDef {
 	pub fn try_from(
 		attr_span: proc_macro2::Span,
@@ -125,12 +190,14 @@ impl StorageDef {
 			return Err(syn::Error::new(item.span(), "Invalid pallet::storage, expected item type"));
 		};
 
-		let mut attrs: Vec<PalletStorageAttr> = helper::take_item_attrs(&mut item.attrs)?;
+		let mut attrs: Vec<PalletStorageAttr> = helper::take_item_pallet_attrs(&mut item.attrs)?;
 		if attrs.len() > 1 {
 			let msg = "Invalid pallet::storage, multiple argument pallet::getter found";
 			return Err(syn::Error::new(attrs[1].getter.span(), msg));
 		}
 		let getter = attrs.pop().map(|attr| attr.getter);
+
+		let cfg_attrs = helper::get_item_cfg_attrs(&item.attrs);
 
 		let mut instances = vec![];
 		instances.push(helper::check_type_def_gen(&item.generics, item.ident.span())?);
@@ -173,11 +240,21 @@ impl StorageDef {
 					value: retrieve_arg(&typ.path.segments[0], 5)?,
 				}
 			}
-			found @ _ => {
+			"StorageNMap" => {
+				query_kind = retrieve_arg(&typ.path.segments[0], 3);
+				let keygen = retrieve_arg(&typ.path.segments[0], 1)?;
+				let keys = collect_keys(&keygen)?;
+				Metadata::NMap {
+					keys,
+					keygen,
+					value: retrieve_arg(&typ.path.segments[0], 2)?,
+				}
+			}
+			found => {
 				let msg = format!(
 					"Invalid pallet::storage, expected ident: `StorageValue` or \
-					`StorageMap` or `StorageDoubleMap` in order to expand metadata, found \
-					`{}`",
+					`StorageMap` or `StorageDoubleMap` or `StorageNMap` in order \
+					to expand metadata, found `{}`",
 					found,
 				);
 				return Err(syn::Error::new(item.ty.span(), msg));
@@ -223,6 +300,7 @@ impl StorageDef {
 			getter,
 			query_kind,
 			where_clause,
+			cfg_attrs,
 		})
 	}
 }

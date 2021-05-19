@@ -57,7 +57,7 @@ pub trait FixedPointNumber:
 	+ Saturating + Bounded
 	+ Eq + PartialEq + Ord + PartialOrd
 	+ CheckedSub + CheckedAdd + CheckedMul + CheckedDiv
-	+ Add + Sub + Div + Mul
+	+ Add + Sub + Div + Mul + Zero + One
 {
 	/// The underlying data type used for this fixed point number.
 	type Inner: Debug + One + CheckedMul + CheckedDiv + FixedPointOperand;
@@ -92,7 +92,7 @@ pub trait FixedPointNumber:
 	///
 	/// Returns `None` if `int` exceeds accuracy.
 	fn checked_from_integer(int: Self::Inner) -> Option<Self> {
-		int.checked_mul(&Self::DIV).map(|inner| Self::from_inner(inner))
+		int.checked_mul(&Self::DIV).map(Self::from_inner)
 	}
 
 	/// Creates `self` from a rational number. Equal to `n / d`.
@@ -119,7 +119,7 @@ pub trait FixedPointNumber:
 
 		multiply_by_rational(n.value, Self::DIV.unique_saturated_into(), d.value).ok()
 			.and_then(|value| from_i129(I129 { value, negative }))
-			.map(|inner| Self::from_inner(inner))
+			.map(Self::from_inner)
 	}
 
 	/// Checked multiplication for integer type `N`. Equal to `self * n`.
@@ -184,7 +184,7 @@ pub trait FixedPointNumber:
 		if inner >= Self::Inner::zero() {
 			self
 		} else {
-			Self::from_inner(inner.checked_neg().unwrap_or_else(|| Self::Inner::max_value()))
+			Self::from_inner(inner.checked_neg().unwrap_or_else(Self::Inner::max_value))
 		}
 	}
 
@@ -193,21 +193,6 @@ pub trait FixedPointNumber:
 	/// Returns `None` if `self = 0`.
 	fn reciprocal(self) -> Option<Self> {
 		Self::one().checked_div(&self)
-	}
-
-	/// Returns zero.
-	fn zero() -> Self {
-		Self::from_inner(Self::Inner::zero())
-	}
-
-	/// Checks if the number is zero.
-	fn is_zero(&self) -> bool {
-		self.into_inner() == Self::Inner::zero()
-	}
-
-	/// Returns one.
-	fn one() -> Self {
-		Self::from_inner(Self::DIV)
 	}
 
 	/// Checks if the number is one.
@@ -230,7 +215,7 @@ pub trait FixedPointNumber:
 		self.into_inner().checked_div(&Self::DIV)
 			.expect("panics only if DIV is zero, DIV is not zero; qed")
 			.checked_mul(&Self::DIV)
-			.map(|inner| Self::from_inner(inner))
+			.map(Self::from_inner)
 			.expect("can not overflow since fixed number is >= integer part")
 	}
 
@@ -254,12 +239,10 @@ pub trait FixedPointNumber:
 	fn ceil(self) -> Self {
 		if self.is_negative() {
 			self.trunc()
+		} else if self.frac() == Self::zero() {
+			self
 		} else {
-			if self.frac() == Self::zero() {
-				self
-			} else {
-				self.saturating_add(Self::one()).trunc()
-			}
+			self.saturating_add(Self::one()).trunc()
 		}
 	}
 
@@ -281,12 +264,10 @@ pub trait FixedPointNumber:
 		let n = self.frac().saturating_mul(Self::saturating_from_integer(10));
 		if n < Self::saturating_from_integer(5) {
 			self.trunc()
+		} else if self.is_positive() {
+			self.saturating_add(Self::one()).trunc()
 		} else {
-			if self.is_positive() {
-				self.saturating_add(Self::one()).trunc()
-			} else {
-				self.saturating_sub(Self::one()).trunc()
-			}
+			self.saturating_sub(Self::one()).trunc()
 		}
 	}
 }
@@ -380,12 +361,12 @@ macro_rules! implement_fixed {
 			}
 
 			#[cfg(any(feature = "std", test))]
-			pub fn from_fraction(x: f64) -> Self {
+			pub fn from_float(x: f64) -> Self {
 				Self((x * (<Self as FixedPointNumber>::DIV as f64)) as $inner_type)
 			}
 
 			#[cfg(any(feature = "std", test))]
-			pub fn to_fraction(self) -> f64 {
+			pub fn to_float(self) -> f64 {
 				self.0 as f64 / <Self as FixedPointNumber>::DIV as f64
 			}
 		}
@@ -518,6 +499,22 @@ macro_rules! implement_fixed {
 			}
 		}
 
+		impl Zero for $name {
+			fn zero() -> Self {
+				Self::from_inner(<Self as FixedPointNumber>::Inner::zero())
+			}
+
+			fn is_zero(&self) -> bool {
+				self.into_inner() == <Self as FixedPointNumber>::Inner::zero()
+			}
+		}
+
+		impl One for $name {
+			fn one() -> Self {
+				Self::from_inner(Self::DIV)
+			}
+		}
+
 		impl sp_std::fmt::Debug for $name {
 			#[cfg(feature = "std")]
 			fn fmt(&self, f: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
@@ -585,7 +582,7 @@ macro_rules! implement_fixed {
 			{
 				use sp_std::str::FromStr;
 				let s = String::deserialize(deserializer)?;
-				$name::from_str(&s).map_err(|err_str| de::Error::custom(err_str))
+				$name::from_str(&s).map_err(de::Error::custom)
 			}
 		}
 

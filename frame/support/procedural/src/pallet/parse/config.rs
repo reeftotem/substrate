@@ -126,6 +126,10 @@ impl syn::parse::Parse for ConfigBoundParse {
 		input.parse::<syn::Token![::]>()?;
 		input.parse::<keyword::Config>()?;
 
+		if input.peek(syn::token::Lt) {
+			input.parse::<syn::AngleBracketedGenericArguments>()?;
+		}
+
 		Ok(Self(ident))
 	}
 }
@@ -255,7 +259,7 @@ pub fn replace_self_by_t(input: proc_macro2::TokenStream) -> proc_macro2::TokenS
 				).into(),
 			proc_macro2::TokenTree::Ident(ident) if ident == "Self" =>
 				proc_macro2::Ident::new("T", ident.span()).into(),
-			other @ _ => other
+			other => other
 		})
 		.collect()
 }
@@ -294,7 +298,7 @@ impl ConfigDef {
 			return Err(syn::Error::new(item.generics.params[2].span(), msg));
 		}
 
-		let has_instance = if let Some(_) = item.generics.params.first() {
+		let has_instance = if item.generics.params.first().is_some() {
 			helper::check_config_def_gen(&item.generics, item.ident.span())?;
 			true
 		} else {
@@ -309,7 +313,7 @@ impl ConfigDef {
 				|| check_event_type(frame_system, trait_item, has_instance)?;
 
 			// Parse for constant
-			let type_attrs_const: Vec<TypeAttrConst> = helper::take_item_attrs(trait_item)?;
+			let type_attrs_const: Vec<TypeAttrConst> = helper::take_item_pallet_attrs(trait_item)?;
 
 			if type_attrs_const.len() > 1 {
 				let msg = "Invalid attribute in pallet::config, only one attribute is expected";
@@ -339,7 +343,7 @@ impl ConfigDef {
 			}
 		}
 
-		let attr: Option<DisableFrameSystemSupertraitCheck> = helper::take_first_item_attr(
+		let attr: Option<DisableFrameSystemSupertraitCheck> = helper::take_first_item_pallet_attr(
 			&mut item.attrs
 		)?;
 

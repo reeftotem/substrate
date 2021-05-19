@@ -166,7 +166,7 @@ impl<B: BlockT> GossipEngine<B> {
 	///
 	/// Note: this method isn't strictly related to gossiping and should eventually be moved
 	/// somewhere else.
-	pub fn announce(&self, block: B::Hash, associated_data: Vec<u8>) {
+	pub fn announce(&self, block: B::Hash, associated_data: Option<Vec<u8>>) {
 		self.network.announce(block, associated_data);
 	}
 }
@@ -188,7 +188,7 @@ impl<B: BlockT> Future for GossipEngine<B> {
 							Event::SyncDisconnected { remote } => {
 								this.network.remove_set_reserved(remote, this.protocol.clone());
 							}
-							Event::NotificationStreamOpened { remote, protocol, role } => {
+							Event::NotificationStreamOpened { remote, protocol, role, .. } => {
 								if protocol != this.protocol {
 									continue;
 								}
@@ -303,7 +303,6 @@ mod tests {
 	use crate::{ValidationResult, ValidatorContext};
 	use futures::{channel::mpsc::{unbounded, UnboundedSender}, executor::{block_on, block_on_stream}, future::poll_fn};
 	use quickcheck::{Arbitrary, Gen, QuickCheck};
-	use rand::Rng;
 	use sc_network::ObservedRole;
 	use sp_runtime::{testing::H256, traits::{Block as BlockT}};
 	use std::borrow::Cow;
@@ -347,7 +346,7 @@ mod tests {
 			unimplemented!();
 		}
 
-		fn announce(&self, _: B::Hash, _: Vec<u8>) {
+		fn announce(&self, _: B::Hash, _: Option<Vec<u8>>) {
 			unimplemented!();
 		}
 	}
@@ -417,6 +416,7 @@ mod tests {
 			Event::NotificationStreamOpened {
 				remote: remote_peer.clone(),
 				protocol: protocol.clone(),
+				negotiated_fallback: None,
 				role: ObservedRole::Authority,
 			}
 		).expect("Event stream is unbounded; qed.");
@@ -469,12 +469,14 @@ mod tests {
 		}
 
 		impl Arbitrary for ChannelLengthAndTopic {
-			fn arbitrary<G: Gen>(g: &mut G) -> Self {
+			fn arbitrary(g: &mut Gen) -> Self {
+				let possible_length = (0..100).collect::<Vec<usize>>();
+				let possible_topics = (0..10).collect::<Vec<u64>>();
 				Self {
-					length: g.gen_range(0, 100),
+					length: *g.choose(&possible_length).unwrap(),
 					// Make sure channel topics and message topics overlap by choosing a small
 					// range.
-					topic: H256::from_low_u64_ne(g.gen_range(0, 10)),
+					topic: H256::from_low_u64_ne(*g.choose(&possible_topics).unwrap()),
 				}
 			}
 		}
@@ -485,11 +487,12 @@ mod tests {
 		}
 
 		impl Arbitrary for Message{
-			fn arbitrary<G: Gen>(g: &mut G) -> Self {
+			fn arbitrary(g: &mut Gen) -> Self {
+				let possible_topics = (0..10).collect::<Vec<u64>>();
 				Self {
 					// Make sure channel topics and message topics overlap by choosing a small
 					// range.
-					topic: H256::from_low_u64_ne(g.gen_range(0, 10)),
+					topic: H256::from_low_u64_ne(*g.choose(&possible_topics).unwrap()),
 				}
 			}
 		}
@@ -573,6 +576,7 @@ mod tests {
 				Event::NotificationStreamOpened {
 					remote: remote_peer.clone(),
 					protocol: protocol.clone(),
+					negotiated_fallback: None,
 					role: ObservedRole::Authority,
 				}
 			).expect("Event stream is unbounded; qed.");
